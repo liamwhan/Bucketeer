@@ -6,12 +6,14 @@ import {
   Download,
   Box,
   Folder,
+  FolderPlus,
   HardDrive,
   Loader2,
   Plus,
   RefreshCw,
   Trash2,
   File,
+  Upload,
   ChevronRight,
   PencilLine,
   X
@@ -67,6 +69,8 @@ export default function App(): JSX.Element {
   const [addBusy, setAddBusy] = useState(false)
 
   const [downloadBusy, setDownloadBusy] = useState(false)
+  const [uploadBusy, setUploadBusy] = useState(false)
+  const [fileDragOver, setFileDragOver] = useState(false)
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
 
   const [createBucketAccountId, setCreateBucketAccountId] = useState<string | null>(null)
@@ -94,6 +98,11 @@ export default function App(): JSX.Element {
   const [renameBusy, setRenameBusy] = useState(false)
   const [renameError, setRenameError] = useState<string | null>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
+
+  const [newFolderOpen, setNewFolderOpen] = useState(false)
+  const [newFolderName, setNewFolderName] = useState('')
+  const [newFolderBusy, setNewFolderBusy] = useState(false)
+  const [newFolderError, setNewFolderError] = useState<string | null>(null)
 
   const refreshAccounts = useCallback(async () => {
     const list = await window.bucketeer.accounts.list()
@@ -144,6 +153,10 @@ export default function App(): JSX.Element {
     setRenameTarget(null)
     setRenameDraft('')
     setRenameError(null)
+    setNewFolderOpen(false)
+    setNewFolderName('')
+    setNewFolderError(null)
+    setFileDragOver(false)
   }, [selection?.accountId, selection?.bucket, prefix])
 
   const cancelRenameAccount = useCallback(() => {
@@ -354,6 +367,81 @@ export default function App(): JSX.Element {
     }
   }
 
+  const onMainDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.dataTransfer.types.includes('Files')) {
+      e.dataTransfer.dropEffect = 'copy'
+    }
+  }, [])
+
+  const onMainDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.dataTransfer.types.includes('Files')) {
+      setFileDragOver(true)
+    }
+  }, [])
+
+  const onMainDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const related = e.relatedTarget as Node | null
+    if (!related || !e.currentTarget.contains(related)) {
+      setFileDragOver(false)
+    }
+  }, [])
+
+  const onMainDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      setFileDragOver(false)
+      const sel = selection
+      if (!sel || uploadBusy) return
+      const files = Array.from(e.dataTransfer.files)
+      if (files.length === 0) return
+      const paths: string[] = []
+      for (const f of files) {
+        try {
+          paths.push(window.bucketeer.pathFromFile(f))
+        } catch {
+          /* non-local drop */
+        }
+      }
+      const unique = [...new Set(paths)]
+      if (unique.length === 0) {
+        setStatusMsg('Only files from your computer can be uploaded (not in-browser content).')
+        return
+      }
+      setUploadBusy(true)
+      setStatusMsg(null)
+      try {
+        const results = await window.bucketeer.s3.uploadLocalFiles(
+          sel.accountId,
+          sel.bucket,
+          prefix,
+          unique
+        )
+        const ok = results.filter((r) => r.ok).length
+        const fail = results.filter((r) => !r.ok)
+        if (fail.length === 0) {
+          setStatusMsg(`Uploaded ${ok} file(s) to the current folder.`)
+        } else {
+          setStatusMsg(
+            `Uploaded ${ok} file(s). ${fail.length} failed: ${fail.map((f) => f.key || f.localPath).join(', ')}`
+          )
+        }
+        await loadObjects(sel, prefix)
+      } catch (err) {
+        setStatusMsg(err instanceof Error ? err.message : String(err))
+      } finally {
+        setUploadBusy(false)
+      }
+    },
+    [loadObjects, prefix, selection, uploadBusy]
+  )
+
   const onDownload = async () => {
     if (!selection || selectedKeys.size === 0) return
     setDownloadBusy(true)
@@ -379,6 +467,40 @@ export default function App(): JSX.Element {
       }
     } finally {
       setDownloadBusy(false)
+    }
+  }
+
+  const onCreateFolderSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!selection) return
+    const name = newFolderName.trim()
+    if (!name) return
+    setNewFolderBusy(true)
+    setNewFolderError(null)
+    try {
+      const b = window.bucketeer
+      if (typeof b.invoke === 'function') {
+        await b.invoke('s3:createFolder', selection.accountId, selection.bucket, prefix, name)
+      } else if (typeof b.s3.createFolder === 'function') {
+        await b.s3.createFolder(
+          selection.accountId,
+          selection.bucket,
+          prefix,
+          name
+        )
+      } else {
+        throw new Error(
+          'Preload script is out of date (createFolder missing). Fully quit Bucketeer (all windows) and start again with npm run dev so Electron reloads the preload bundle.'
+        )
+      }
+      setNewFolderOpen(false)
+      setNewFolderName('')
+      await loadObjects(selection, prefix)
+      setStatusMsg(`Created folder “${name}”.`)
+    } catch (err) {
+      setNewFolderError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setNewFolderBusy(false)
     }
   }
 
@@ -574,7 +696,15 @@ export default function App(): JSX.Element {
           </ul>
         </aside>
 
-        <main className="flex min-w-0 flex-1 flex-col bg-pane-bg">
+        <main
+          className={`relative flex min-w-0 flex-1 flex-col bg-pane-bg ${
+            selection && fileDragOver ? 'ring-2 ring-inset ring-sky-500/70' : ''
+          }`}
+          onDragOver={selection ? onMainDragOver : undefined}
+          onDragEnter={selection ? onMainDragEnter : undefined}
+          onDragLeave={selection ? onMainDragLeave : undefined}
+          onDrop={selection ? onMainDrop : undefined}
+        >
           {!selection && (
             <div className="flex flex-1 items-center justify-center text-slate-500">
               Select a bucket to browse objects.
@@ -582,6 +712,17 @@ export default function App(): JSX.Element {
           )}
           {selection && (
             <>
+              {fileDragOver && (
+                <div
+                  className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-sky-950/35"
+                  aria-hidden
+                >
+                  <div className="flex items-center gap-2 rounded-lg border border-dashed border-sky-400/80 bg-[#121a24]/95 px-6 py-4 text-sm font-medium text-sky-100 shadow-lg">
+                    <Upload className="h-5 w-5 shrink-0 text-sky-400" />
+                    Drop files to upload to this folder
+                  </div>
+                </div>
+              )}
               <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-pane-border px-3 py-2">
                 <nav className="flex min-w-0 flex-1 items-center gap-1 text-sm">
                   <button
@@ -607,11 +748,24 @@ export default function App(): JSX.Element {
                 <button
                   type="button"
                   onClick={() => void loadObjects(selection, prefix)}
-                  disabled={objectsLoading}
+                  disabled={objectsLoading || uploadBusy}
                   className="inline-flex items-center gap-1 rounded border border-pane-border px-2 py-1 text-xs text-slate-300 hover:bg-pane-hover disabled:opacity-50"
                 >
                   <RefreshCw className={`h-3.5 w-3.5 ${objectsLoading ? 'animate-spin' : ''}`} />
                   Refresh
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewFolderOpen(true)
+                    setNewFolderName('')
+                    setNewFolderError(null)
+                  }}
+                  disabled={objectsLoading}
+                  className="inline-flex items-center gap-1 rounded border border-pane-border px-2 py-1 text-xs text-slate-300 hover:bg-pane-hover disabled:opacity-50"
+                >
+                  <FolderPlus className="h-3.5 w-3.5" />
+                  New folder
                 </button>
                 <button
                   type="button"
@@ -686,7 +840,10 @@ export default function App(): JSX.Element {
                     {!objectsLoading && rows.length === 0 && !objectsError && (
                       <tr>
                         <td colSpan={4} className="px-3 py-8 text-center text-slate-500">
-                          This folder is empty.
+                          <p>This folder is empty.</p>
+                          <p className="mt-2 text-xs text-slate-600">
+                            Drag files from your computer onto this panel to upload them here.
+                          </p>
                         </td>
                       </tr>
                     )}
@@ -852,6 +1009,71 @@ export default function App(): JSX.Element {
                 >
                   {renameBusy && <Loader2 className="h-4 w-4 animate-spin" />}
                   Rename
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {newFolderOpen && selection && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="new-folder-title"
+            className="w-full max-w-md rounded-lg border border-pane-border bg-[#121a24] p-5 shadow-xl"
+          >
+            <h2 id="new-folder-title" className="text-lg font-semibold text-white">
+              New folder
+            </h2>
+            <p className="mt-1 break-all font-mono text-xs text-slate-500">
+              {selection.bucket}
+              {prefix ? ` / ${prefix.replace(/\/$/, '').split('/').join(' / ')}` : ''}
+            </p>
+            <p className="mt-2 text-xs text-slate-500">
+              S3 has no real folders—this creates a zero-byte placeholder object whose name ends
+              with <span className="font-mono text-slate-400">/</span>, so the console and this app
+              show a folder here.
+            </p>
+            <form onSubmit={(e) => void onCreateFolderSubmit(e)} className="mt-4 space-y-3">
+              {newFolderError && (
+                <p className="rounded border border-red-900/50 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                  {newFolderError}
+                </p>
+              )}
+              <label className="block text-sm">
+                <span className="text-slate-400">Folder name</span>
+                <input
+                  required
+                  autoFocus
+                  autoComplete="off"
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  className="mt-1 w-full rounded border border-pane-border bg-[#0c1016] px-3 py-2 font-mono text-sm text-white outline-none focus:border-sky-600"
+                  placeholder="e.g. uploads"
+                />
+              </label>
+              <p className="text-xs text-slate-500">No slashes—creates one level under the path above.</p>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewFolderOpen(false)
+                    setNewFolderName('')
+                    setNewFolderError(null)
+                  }}
+                  className="rounded px-3 py-1.5 text-sm text-slate-300 hover:bg-pane-hover"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={newFolderBusy || !newFolderName.trim()}
+                  className="inline-flex items-center gap-2 rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+                >
+                  {newFolderBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                  Create
                 </button>
               </div>
             </form>

@@ -3,7 +3,7 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import * as accountsStore from './accountsStore.js'
 import * as s3 from './s3Service.js'
-import type { AwsAccount } from '../shared/types.js'
+import type { AwsAccount, UploadResult } from '../shared/types.js'
 
 function preloadScriptPath(): string {
   const dir = join(__dirname, '../preload')
@@ -121,6 +121,34 @@ app.whenReady().then(() => {
     ): Promise<{ newKey: string }> => {
       const account = getAccountOrThrow(accountId)
       return s3.renameObject(account, bucket, sourceKey, newFileName)
+    }
+  )
+
+  ipcMain.handle(
+    's3:createFolder',
+    async (
+      _,
+      accountId: string,
+      bucket: string,
+      prefix: string,
+      folderName: string
+    ): Promise<{ key: string }> => {
+      const account = getAccountOrThrow(accountId)
+      return s3.createFolder(account, bucket, prefix, folderName)
+    }
+  )
+
+  ipcMain.handle(
+    's3:uploadLocalFiles',
+    async (
+      _,
+      accountId: string,
+      bucket: string,
+      prefix: string,
+      localPaths: string[]
+    ): Promise<UploadResult[]> => {
+      const account = getAccountOrThrow(accountId)
+      return s3.uploadLocalFiles(account, bucket, prefix, localPaths)
     }
   )
 

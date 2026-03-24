@@ -1,5 +1,6 @@
-import { mkdir, createWriteStream } from 'fs'
-import { dirname, join } from 'path'
+import { mkdir, createWriteStream, createReadStream } from 'fs'
+import { stat } from 'fs/promises'
+import { basename, dirname, join } from 'path'
 import { pipeline } from 'stream/promises'
 import type { Readable } from 'stream'
 import {
@@ -10,10 +11,11 @@ import {
   CreateBucketCommand,
   CopyObjectCommand,
   DeleteObjectCommand,
+  PutObjectCommand,
   type Bucket,
   type BucketLocationConstraint
 } from '@aws-sdk/client-s3'
-import type { AwsAccount, ListObjectsRow, DownloadResult } from '../shared/types.js'
+import type { AwsAccount, ListObjectsRow, DownloadResult, UploadResult } from '../shared/types.js'
 
 const clientCache = new Map<string, S3Client>()
 
@@ -218,4 +220,83 @@ export async function renameObject(
   }
 
   return { newKey }
+}
+
+/**
+ * Folders in S3 are a UI convention: create an empty object whose key ends with `/`
+ * so it appears under the current prefix when using delimiter `/`.
+ */
+export async function createFolder(
+  account: AwsAccount,
+  bucket: string,
+  prefix: string,
+  folderName: string
+): Promise<{ key: string }> {
+  const segment = folderName.trim().replace(/\/+$/, '')
+  if (!segment) {
+    throw new Error('Folder name is required')
+  }
+  if (segment.includes('/') || segment.includes('\\')) {
+    throw new Error('Folder name cannot contain path separators')
+  }
+
+  const normalizedPrefix =
+    prefix === '' ? '' : prefix.endsWith('/') ? prefix : `${prefix}/`
+  const key = `${normalizedPrefix}${segment}/`
+
+  const client = clientFor(account)
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: new Uint8Array(0)
+    })
+  )
+  return { key }
+}
+
+/**
+ * Upload local files into the bucket under the current prefix (object key = prefix + basename).
+ */
+export async function uploadLocalFiles(
+  account: AwsAccount,
+  bucket: string,
+  prefix: string,
+  localPaths: string[]
+): Promise<UploadResult[]> {
+  const normalizedPrefix =
+    prefix === '' ? '' : prefix.endsWith('/') ? prefix : `${prefix}/`
+  const client = clientFor(account)
+  const results: UploadResult[] = []
+
+  for (const localPath of localPaths) {
+    const name = basename(localPath)
+    const key = `${normalizedPrefix}${name}`
+    if (!name || name === '.' || name === '..') {
+      results.push({ key, localPath, ok: false, error: 'Invalid file path' })
+      continue
+    }
+    try {
+      const st = await stat(localPath)
+      if (!st.isFile()) {
+        results.push({ key, localPath, ok: false, error: 'Not a file (folders are not uploaded)' })
+        continue
+      }
+      const body = createReadStream(localPath)
+      await client.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          Body: body,
+          ContentLength: st.size
+        })
+      )
+      results.push({ key, localPath, ok: true })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      results.push({ key, localPath, ok: false, error: msg })
+    }
+  }
+
+  return results
 }

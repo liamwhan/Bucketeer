@@ -20,3 +20,7 @@ export type ListObjectsRow = ListObjectsFolder | ListObjectsFile
 export type DownloadResult =
   | { key: string; ok: true; path: string }
   | { key: string; ok: false; error: string }
+
+export type UploadResult =
+  | { key: string; localPath: string; ok: true }
+  | { key: string; localPath: string; ok: false; error: string }
