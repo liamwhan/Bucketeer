@@ -1,6 +1,6 @@
 {
   "name": "bucketeer",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Free open source multi-account Amazon S3 desktop browser",
   "author": "Liam Whan",
   "license": "MIT",
@@ -32,6 +32,6 @@
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "typescript": "~5.6.2",
-    "vite": "^8.0.2"
+    "vite": "^7.3.1"
   }
 }
