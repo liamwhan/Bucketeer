@@ -24,5 +24,11 @@ export interface BucketeerApi {
       keys: string[],
       destDir: string
     ) => Promise<DownloadResult[]>
+    renameObject: (
+      accountId: string,
+      bucket: string,
+      sourceKey: string,
+      newFileName: string
+    ) => Promise<{ newKey: string }>
   }
 }

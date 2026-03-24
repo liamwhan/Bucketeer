@@ -13,6 +13,7 @@ import {
   Trash2,
   File,
   ChevronRight,
+  PencilLine,
   X
 } from 'lucide-react'
 
@@ -77,6 +78,23 @@ export default function App(): JSX.Element {
   const [editingLabelDraft, setEditingLabelDraft] = useState('')
   const accountLabelInputRef = useRef<HTMLInputElement>(null)
 
+  const [objectContextMenu, setObjectContextMenu] = useState<{
+    x: number
+    y: number
+    sourceKey: string
+    displayName: string
+  } | null>(null)
+  const objectContextMenuRef = useRef<HTMLDivElement>(null)
+
+  const [renameTarget, setRenameTarget] = useState<{
+    sourceKey: string
+    displayName: string
+  } | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [renameBusy, setRenameBusy] = useState(false)
+  const [renameError, setRenameError] = useState<string | null>(null)
+  const renameInputRef = useRef<HTMLInputElement>(null)
+
   const refreshAccounts = useCallback(async () => {
     const list = await window.bucketeer.accounts.list()
     setAccounts(list)
@@ -93,6 +111,40 @@ export default function App(): JSX.Element {
       el.select()
     }
   }, [editingAccountId])
+
+  useEffect(() => {
+    if (!objectContextMenu) return
+    const onPointerDown = (e: PointerEvent) => {
+      const el = objectContextMenuRef.current
+      if (el && !el.contains(e.target as Node)) {
+        setObjectContextMenu(null)
+      }
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setObjectContextMenu(null)
+    }
+    window.addEventListener('pointerdown', onPointerDown, true)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [objectContextMenu])
+
+  useEffect(() => {
+    if (renameTarget && renameInputRef.current) {
+      const el = renameInputRef.current
+      el.focus()
+      el.select()
+    }
+  }, [renameTarget])
+
+  useEffect(() => {
+    setObjectContextMenu(null)
+    setRenameTarget(null)
+    setRenameDraft('')
+    setRenameError(null)
+  }, [selection?.accountId, selection?.bucket, prefix])
 
   const cancelRenameAccount = useCallback(() => {
     setEditingAccountId(null)
@@ -327,6 +379,40 @@ export default function App(): JSX.Element {
       }
     } finally {
       setDownloadBusy(false)
+    }
+  }
+
+  const onRenameObjectSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!selection || !renameTarget) return
+    const sourceKey = renameTarget.sourceKey
+    const nextName = renameDraft.trim()
+    if (!nextName) return
+    setRenameBusy(true)
+    setRenameError(null)
+    try {
+      const { newKey } = await window.bucketeer.s3.renameObject(
+        selection.accountId,
+        selection.bucket,
+        sourceKey,
+        nextName
+      )
+      setRenameTarget(null)
+      setRenameDraft('')
+      await loadObjects(selection, prefix)
+      setSelectedKeys((prev) => {
+        const n = new Set(prev)
+        if (n.delete(sourceKey)) {
+          n.add(newKey)
+        }
+        return n
+      })
+      const shown = newKey.slice(Math.max(0, newKey.lastIndexOf('/') + 1))
+      setStatusMsg(`Renamed object to “${shown}”.`)
+    } catch (err) {
+      setRenameError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRenameBusy(false)
     }
   }
 
@@ -629,6 +715,15 @@ export default function App(): JSX.Element {
                         <tr
                           key={row.key}
                           className={`hover:bg-pane-hover/80 ${checked ? 'bg-sky-950/20' : ''}`}
+                          onContextMenu={(e) => {
+                            e.preventDefault()
+                            setObjectContextMenu({
+                              x: e.clientX,
+                              y: e.clientY,
+                              sourceKey: row.key,
+                              displayName: row.name
+                            })
+                          }}
                         >
                           <td className="px-3 py-1.5">
                             <input
@@ -660,6 +755,109 @@ export default function App(): JSX.Element {
           )}
         </main>
       </div>
+
+      {objectContextMenu && (
+        <div
+          ref={objectContextMenuRef}
+          className="fixed z-[60] min-w-[10rem] rounded-md border border-pane-border bg-[#1a2332] py-1 shadow-xl"
+          style={{
+            left: Math.max(
+              8,
+              Math.min(
+                objectContextMenu.x,
+                typeof window !== 'undefined' ? window.innerWidth - 172 : objectContextMenu.x
+              )
+            ),
+            top: Math.max(
+              8,
+              Math.min(
+                objectContextMenu.y,
+                typeof window !== 'undefined' ? window.innerHeight - 48 : objectContextMenu.y
+              )
+            )
+          }}
+          role="menu"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-200 hover:bg-pane-hover"
+            onClick={() => {
+              setRenameTarget({
+                sourceKey: objectContextMenu.sourceKey,
+                displayName: objectContextMenu.displayName
+              })
+              setRenameDraft(objectContextMenu.displayName)
+              setRenameError(null)
+              setObjectContextMenu(null)
+            }}
+          >
+            <PencilLine className="h-4 w-4 shrink-0 text-sky-400" />
+            Rename…
+          </button>
+        </div>
+      )}
+
+      {renameTarget && selection && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rename-object-title"
+            className="w-full max-w-md rounded-lg border border-pane-border bg-[#121a24] p-5 shadow-xl"
+          >
+            <h2 id="rename-object-title" className="text-lg font-semibold text-white">
+              Rename object
+            </h2>
+            <p className="mt-1 break-all font-mono text-xs text-slate-500">{renameTarget.sourceKey}</p>
+            <p className="mt-2 text-xs text-slate-500">
+              The object is copied to a new key in the same folder, then the original is deleted.
+              Objects larger than 5&nbsp;GB may fail (single-part copy limit).
+            </p>
+            <form onSubmit={(e) => void onRenameObjectSubmit(e)} className="mt-4 space-y-3">
+              {renameError && (
+                <p className="rounded border border-red-900/50 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                  {renameError}
+                </p>
+              )}
+              <label className="block text-sm">
+                <span className="text-slate-400">New file name</span>
+                <input
+                  ref={renameInputRef}
+                  required
+                  autoComplete="off"
+                  value={renameDraft}
+                  onChange={(e) => setRenameDraft(e.target.value)}
+                  className="mt-1 w-full rounded border border-pane-border bg-[#0c1016] px-3 py-2 font-mono text-sm text-white outline-none focus:border-sky-600"
+                  placeholder="new-name.txt"
+                />
+              </label>
+              <p className="text-xs text-slate-500">Slashes are not allowed (stay in the current folder).</p>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRenameTarget(null)
+                    setRenameDraft('')
+                    setRenameError(null)
+                  }}
+                  className="rounded px-3 py-1.5 text-sm text-slate-300 hover:bg-pane-hover"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={renameBusy || !renameDraft.trim()}
+                  className="inline-flex items-center gap-2 rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+                >
+                  {renameBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                  Rename
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {createBucketAccountId && createBucketTargetAccount && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">

@@ -8,6 +8,8 @@ import {
   ListObjectsV2Command,
   GetObjectCommand,
   CreateBucketCommand,
+  CopyObjectCommand,
+  DeleteObjectCommand,
   type Bucket,
   type BucketLocationConstraint
 } from '@aws-sdk/client-s3'
@@ -157,4 +159,63 @@ export async function downloadObjects(
   }
 
   return results
+}
+
+/** CopySource must be `bucket` + `/` + URL-encoded object key (slashes in key → %2F). */
+function copySourceForKey(bucket: string, objectKey: string): string {
+  return `${bucket}/${encodeURIComponent(objectKey)}`
+}
+
+/**
+ * Rename = copy to new key in same "folder" (same parent prefix) then delete original.
+ * Single-part copy only (objects larger than 5 GB need multipart copy — not supported here).
+ */
+export async function renameObject(
+  account: AwsAccount,
+  bucket: string,
+  sourceKey: string,
+  newFileName: string
+): Promise<{ newKey: string }> {
+  const segment = newFileName.trim()
+  if (!segment) {
+    throw new Error('New name is required')
+  }
+  if (segment.includes('/') || segment.includes('\\')) {
+    throw new Error('Object name cannot contain path separators')
+  }
+
+  const lastSlash = sourceKey.lastIndexOf('/')
+  const parent = lastSlash === -1 ? '' : sourceKey.slice(0, lastSlash + 1)
+  const newKey = `${parent}${segment}`
+
+  if (newKey === sourceKey) {
+    return { newKey }
+  }
+
+  const client = clientFor(account)
+  const copySource = copySourceForKey(bucket, sourceKey)
+
+  await client.send(
+    new CopyObjectCommand({
+      Bucket: bucket,
+      Key: newKey,
+      CopySource: copySource
+    })
+  )
+
+  try {
+    await client.send(
+      new DeleteObjectCommand({
+        Bucket: bucket,
+        Key: sourceKey
+      })
+    )
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    throw new Error(
+      `Object was copied to "${newKey}" but deleting the original failed: ${msg}`
+    )
+  }
+
+  return { newKey }
 }

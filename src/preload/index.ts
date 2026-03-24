@@ -17,7 +17,9 @@ const api = {
       ipcRenderer.invoke('s3:listObjects', accountId, bucket, prefix),
     pickDownloadDir: (): Promise<string | null> => ipcRenderer.invoke('s3:pickDownloadDir'),
     downloadObjects: (accountId: string, bucket: string, keys: string[], destDir: string) =>
-      ipcRenderer.invoke('s3:downloadObjects', accountId, bucket, keys, destDir)
+      ipcRenderer.invoke('s3:downloadObjects', accountId, bucket, keys, destDir),
+    renameObject: (accountId: string, bucket: string, sourceKey: string, newFileName: string) =>
+      ipcRenderer.invoke('s3:renameObject', accountId, bucket, sourceKey, newFileName)
   }
 }
 

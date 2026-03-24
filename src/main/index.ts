@@ -110,6 +110,20 @@ app.whenReady().then(() => {
     }
   )
 
+  ipcMain.handle(
+    's3:renameObject',
+    async (
+      _,
+      accountId: string,
+      bucket: string,
+      sourceKey: string,
+      newFileName: string
+    ): Promise<{ newKey: string }> => {
+      const account = getAccountOrThrow(accountId)
+      return s3.renameObject(account, bucket, sourceKey, newFileName)
+    }
+  )
+
   createWindow()
 
   app.on('activate', () => {
