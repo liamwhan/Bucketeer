@@ -2,6 +2,7 @@
   "name": "bucketeer",
   "version": "0.1.0",
   "description": "Free open source multi-account Amazon S3 desktop browser",
+  "license": "MIT",
   "main": "out/main/index.js",
   "type": "module",
   "scripts": {
