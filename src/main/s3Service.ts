@@ -1,7 +1,7 @@
 import { createWriteStream, createReadStream } from 'fs'
 import { mkdir, mkdtemp, readFile, stat, writeFile, rm } from 'fs/promises'
 import { tmpdir } from 'os'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'path'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'path'
 import { pipeline } from 'stream/promises'
 import { Transform, type Readable } from 'stream'
 import { createHash } from 'crypto'
@@ -442,7 +442,8 @@ export async function uploadLocalFiles(
           Bucket: bucket,
           Key: key,
           Body: body,
-          ContentLength: st.size
+          ContentLength: st.size,
+          ContentType: inferContentTypeFromPath(localPath)
         })
       )
       results.push({ key, localPath, ok: true })
@@ -483,8 +484,44 @@ export async function cleanupPreviewCache(): Promise<void> {
 function inferContentTypeFromKey(key: string): string {
   const lower = key.toLowerCase()
   if (lower.endsWith('.json')) return 'application/json'
+  if (lower.endsWith('.yaml') || lower.endsWith('.yml')) return 'application/yaml'
+  if (lower.endsWith('.xml')) return 'application/xml'
   if (lower.endsWith('.pdf')) return 'application/pdf'
   return 'application/octet-stream'
+}
+
+function inferContentTypeFromPath(localPath: string): string {
+  const ext = extname(localPath).toLowerCase()
+  if (ext === '.json') return 'application/json'
+  if (ext === '.yaml' || ext === '.yml') return 'application/yaml'
+  if (ext === '.xml') return 'application/xml'
+  if (ext === '.pdf') return 'application/pdf'
+  return 'application/octet-stream'
+}
+
+function looksLikePdf(raw: Buffer): boolean {
+  if (raw.length < 5) return false
+  return raw.subarray(0, 5).toString('ascii') === '%PDF-'
+}
+
+function resolvePreviewContentType(s3ContentType: string | undefined, key: string, raw: Buffer): string {
+  const normalized = (s3ContentType ?? '').trim().toLowerCase()
+  if (!normalized) {
+    return inferContentTypeFromKey(key)
+  }
+
+  // Recover richer type metadata when S3 returns generic binary content.
+  if (normalized.includes('application/octet-stream')) {
+    if (looksLikePdf(raw) || key.toLowerCase().endsWith('.pdf')) {
+      return 'application/pdf'
+    }
+    const inferred = inferContentTypeFromKey(key)
+    if (!inferred.includes('application/octet-stream')) {
+      return inferred
+    }
+  }
+
+  return s3ContentType as string
 }
 
 export async function getObjectPreview(
@@ -510,7 +547,7 @@ export async function getObjectPreview(
 
   await pipeline(body as Readable, createWriteStream(tempPath))
   const raw = await readFile(tempPath)
-  const contentType = res.ContentType || inferContentTypeFromKey(key)
+  const contentType = resolvePreviewContentType(res.ContentType, key, raw)
   const text = contentType.toLowerCase().includes('application/pdf') ? '' : raw.toString('utf8')
   const contentRange = res.ContentRange ?? ''
   const totalMatch = /\/(\d+)$/.exec(contentRange)
@@ -546,12 +583,14 @@ export async function getObjectPreview(
   }
 
   schedulePreviewCleanup(tempPath)
+  const isPdf = contentType.toLowerCase().includes('application/pdf')
   return {
     key,
     tempPath,
     contentType,
     text,
-    wasTruncated
+    wasTruncated,
+    ...(isPdf ? { pdfBase64: raw.toString('base64') } : {})
   }
 }
 

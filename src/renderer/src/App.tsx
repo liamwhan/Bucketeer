@@ -22,14 +22,14 @@ import {
 function formatBytes(n: number | undefined): string {
   if (n == null || Number.isNaN(n)) return '—'
   if (n < 1024) return `${n} B`
-  const u = ['KB', 'MB', 'GB', 'TB']
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']
   let v = n
   let i = 0
   while (v >= 1024 && i < u.length - 1) {
     v /= 1024
     i++
   }
-  return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${u[i]}`
+  return `${v < 10 && i > 1 ? v.toFixed(1) : Math.round(v)} ${u[i]}`
 }
 
 function formatDate(iso: string | undefined): string {
@@ -131,17 +131,6 @@ function isPdfFileName(fileName: string): boolean {
 function isPdfPreview(contentType: string, key: string): boolean {
   if (isPdfFileName(key)) return true
   return contentType.toLowerCase().includes('application/pdf')
-}
-
-function toFileUrl(localPath: string): string {
-  const normalized = localPath.replace(/\\/g, '/')
-  if (/^[a-zA-Z]:\//.test(normalized)) {
-    return `file:///${encodeURI(normalized)}`
-  }
-  if (normalized.startsWith('/')) {
-    return `file://${encodeURI(normalized)}`
-  }
-  return `file://${encodeURI(`/${normalized}`)}`
 }
 
 type Selection = { accountId: string; bucket: string }
@@ -301,6 +290,7 @@ export default function App(): JSX.Element {
         text: string
         tempPath: string
         wasTruncated: boolean
+        pdfBase64?: string
       }
     | { status: 'error'; message: string }
   >({ status: 'idle' })
@@ -730,7 +720,8 @@ export default function App(): JSX.Element {
           contentType: result.contentType,
           text: result.text,
           tempPath: result.tempPath,
-          wasTruncated: result.wasTruncated
+          wasTruncated: result.wasTruncated,
+          pdfBase64: result.pdfBase64
         })
         setPreviewDraft(result.text)
       } catch (err) {
@@ -876,6 +867,13 @@ export default function App(): JSX.Element {
     const strategy = strategyForPreview(previewState.contentType, previewState.key)
     if (!strategy) return [{ type: 'plain', value: previewState.text }]
     return strategy.previewRenderer(previewState.text)
+  }, [previewState])
+
+  const previewPdfDataUrl = useMemo(() => {
+    if (previewState.status !== 'ready') return null
+    if (!isPdfPreview(previewState.contentType, previewState.key)) return null
+    if (!previewState.pdfBase64) return null
+    return `data:application/pdf;base64,${previewState.pdfBase64}`
   }, [previewState])
 
   return (
@@ -1333,11 +1331,17 @@ export default function App(): JSX.Element {
                           )}
                           {!previewEditMode &&
                             (isPdfPreview(previewState.contentType, previewState.key) ? (
-                              <iframe
-                                src={toFileUrl(previewState.tempPath)}
-                                title={`PDF preview for ${previewState.key}`}
-                                className="h-[65vh] w-full rounded border border-pane-border bg-[#0b111b]"
-                              />
+                              previewPdfDataUrl ? (
+                                <iframe
+                                  src={previewPdfDataUrl}
+                                  title={`PDF preview for ${previewState.key}`}
+                                  className="h-[65vh] w-full rounded border border-pane-border bg-[#0b111b]"
+                                />
+                              ) : (
+                                <p className="text-xs text-slate-400">
+                                  PDF preview is unavailable for this object.
+                                </p>
+                              )
                             ) : (
                               <pre className="json-preview overflow-auto rounded border border-pane-border bg-[#0b111b] p-3 text-xs leading-relaxed text-slate-200">
                                 {(previewTokens ?? []).map((token, idx) => (

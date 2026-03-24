@@ -31,6 +31,7 @@ export type ObjectPreviewResult = {
   contentType: string
   text: string
   wasTruncated: boolean
+  pdfBase64?: string
 }
 
 export type SaveObjectResult = {
