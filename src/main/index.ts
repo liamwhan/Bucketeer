@@ -16,6 +16,11 @@ function resolveWindowIcon(): string | undefined {
   if (existsSync(dev)) {
     return dev
   }
+  // Dev fallback: use the source artwork directly when build/icon.* doesn't exist yet.
+  const sourcePng = join(app.getAppPath(), 'Bucketeer.png')
+  if (existsSync(sourcePng)) {
+    return sourcePng
+  }
   return undefined
 }
 import * as accountsStore from './accountsStore.js'
@@ -168,6 +173,14 @@ app.whenReady().then(() => {
     ): Promise<UploadResult[]> => {
       const account = getAccountOrThrow(accountId)
       return s3.uploadLocalFiles(account, bucket, prefix, localPaths)
+    }
+  )
+
+  ipcMain.handle(
+    's3:getObjectPreview',
+    async (_, accountId: string, bucket: string, key: string) => {
+      const account = getAccountOrThrow(accountId)
+      return s3.getObjectPreview(account, bucket, key)
     }
   )
 

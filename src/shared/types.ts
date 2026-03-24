@@ -24,3 +24,11 @@ export type DownloadResult =
 export type UploadResult =
   | { key: string; localPath: string; ok: true }
   | { key: string; localPath: string; ok: false; error: string }
+
+export type ObjectPreviewResult = {
+  key: string
+  tempPath: string
+  contentType: string
+  text: string
+  wasTruncated: boolean
+}

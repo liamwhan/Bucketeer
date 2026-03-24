@@ -1,4 +1,10 @@
-import type { AwsAccount, DownloadResult, ListObjectsRow, UploadResult } from './types.js'
+import type {
+  AwsAccount,
+  DownloadResult,
+  ListObjectsRow,
+  ObjectPreviewResult,
+  UploadResult
+} from './types.js'
 
 export type S3BucketSummary = { Name?: string; CreationDate?: string }
 
@@ -46,5 +52,10 @@ export interface BucketeerApi {
       prefix: string,
       localPaths: string[]
     ) => Promise<UploadResult[]>
+    getObjectPreview: (
+      accountId: string,
+      bucket: string,
+      key: string
+    ) => Promise<ObjectPreviewResult>
   }
 }

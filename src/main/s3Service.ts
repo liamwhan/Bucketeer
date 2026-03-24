@@ -1,5 +1,6 @@
 import { mkdir, createWriteStream, createReadStream } from 'fs'
-import { stat } from 'fs/promises'
+import { mkdtemp, readFile, stat, writeFile } from 'fs/promises'
+import { tmpdir } from 'os'
 import { basename, dirname, join } from 'path'
 import { pipeline } from 'stream/promises'
 import type { Readable } from 'stream'
@@ -16,7 +17,13 @@ import {
   type Bucket,
   type BucketLocationConstraint
 } from '@aws-sdk/client-s3'
-import type { AwsAccount, ListObjectsRow, DownloadResult, UploadResult } from '../shared/types.js'
+import type {
+  AwsAccount,
+  ListObjectsRow,
+  DownloadResult,
+  ObjectPreviewResult,
+  UploadResult
+} from '../shared/types.js'
 
 const clientCache = new Map<string, S3Client>()
 const bucketRegionCache = new Map<string, string>()
@@ -360,4 +367,75 @@ export async function uploadLocalFiles(
   }
 
   return results
+}
+
+const PREVIEW_MAX_BYTES = 512 * 1024
+
+function inferContentTypeFromKey(key: string): string {
+  const lower = key.toLowerCase()
+  if (lower.endsWith('.json')) return 'application/json'
+  return 'application/octet-stream'
+}
+
+export async function getObjectPreview(
+  account: AwsAccount,
+  bucket: string,
+  key: string
+): Promise<ObjectPreviewResult> {
+  const client = await clientForBucket(account, bucket)
+  const tmpBase = await mkdtemp(join(tmpdir(), 'bucketeer-preview-'))
+  const tempPath = join(tmpBase, basename(key) || 'preview.txt')
+
+  const res = await client.send(
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Range: `bytes=0-${PREVIEW_MAX_BYTES - 1}`
+    })
+  )
+  const body = res.Body
+  if (!body) {
+    throw new Error('Empty response body')
+  }
+
+  await pipeline(body as Readable, createWriteStream(tempPath))
+  const raw = await readFile(tempPath)
+  const contentType = res.ContentType || inferContentTypeFromKey(key)
+  const text = raw.toString('utf8')
+  const contentRange = res.ContentRange ?? ''
+  const totalMatch = /\/(\d+)$/.exec(contentRange)
+  const totalBytes = totalMatch ? Number(totalMatch[1]) : Number.NaN
+  const wasTruncated = Number.isFinite(totalBytes)
+    ? totalBytes > PREVIEW_MAX_BYTES
+    : raw.length >= PREVIEW_MAX_BYTES
+
+  if (contentType.includes('application/json')) {
+    try {
+      const pretty = JSON.stringify(JSON.parse(text), null, 2)
+      await writeFile(tempPath, pretty, 'utf8')
+      return {
+        key,
+        tempPath,
+        contentType,
+        text: pretty,
+        wasTruncated
+      }
+    } catch {
+      return {
+        key,
+        tempPath,
+        contentType,
+        text,
+        wasTruncated
+      }
+    }
+  }
+
+  return {
+    key,
+    tempPath,
+    contentType,
+    text,
+    wasTruncated
+  }
 }

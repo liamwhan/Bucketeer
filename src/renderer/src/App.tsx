@@ -41,7 +41,93 @@ function formatDate(iso: string | undefined): string {
   }
 }
 
+const PREVIEW_MAX_BYTES = 512 * 1024
+
 type Selection = { accountId: string; bucket: string }
+
+type JsonTokenType = 'key' | 'string' | 'number' | 'boolean' | 'null' | 'punctuation' | 'plain'
+type JsonToken = { type: JsonTokenType; value: string }
+
+function tokenizeJsonForPreview(raw: string): JsonToken[] {
+  let text = raw
+  try {
+    text = JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return [{ type: 'plain', value: raw }]
+  }
+
+  const tokens: JsonToken[] = []
+  let i = 0
+
+  while (i < text.length) {
+    const ch = text[i]
+    if (!ch) break
+
+    if (/\s/.test(ch)) {
+      let j = i + 1
+      while (j < text.length && /\s/.test(text[j] || '')) j++
+      tokens.push({ type: 'plain', value: text.slice(i, j) })
+      i = j
+      continue
+    }
+
+    if ('{}[],:'.includes(ch)) {
+      tokens.push({ type: 'punctuation', value: ch })
+      i++
+      continue
+    }
+
+    if (ch === '"') {
+      let j = i + 1
+      let escaped = false
+      while (j < text.length) {
+        const c = text[j]
+        if (!c) break
+        if (!escaped && c === '"') {
+          j++
+          break
+        }
+        escaped = !escaped && c === '\\'
+        if (escaped && c !== '\\') escaped = false
+        if (!escaped && c !== '\\') escaped = false
+        j++
+      }
+      const value = text.slice(i, j)
+      let k = j
+      while (k < text.length && /\s/.test(text[k] || '')) k++
+      const isKey = text[k] === ':'
+      tokens.push({ type: isKey ? 'key' : 'string', value })
+      i = j
+      continue
+    }
+
+    if (ch === '-' || /[0-9]/.test(ch)) {
+      let j = i + 1
+      while (j < text.length && /[0-9eE+.-]/.test(text[j] || '')) j++
+      tokens.push({ type: 'number', value: text.slice(i, j) })
+      i = j
+      continue
+    }
+
+    if (text.startsWith('true', i) || text.startsWith('false', i)) {
+      const v = text.startsWith('true', i) ? 'true' : 'false'
+      tokens.push({ type: 'boolean', value: v })
+      i += v.length
+      continue
+    }
+
+    if (text.startsWith('null', i)) {
+      tokens.push({ type: 'null', value: 'null' })
+      i += 4
+      continue
+    }
+
+    tokens.push({ type: 'plain', value: ch })
+    i++
+  }
+
+  return tokens
+}
 
 export default function App(): JSX.Element {
   const [accounts, setAccounts] = useState<AwsAccount[]>([])
@@ -103,6 +189,20 @@ export default function App(): JSX.Element {
   const [newFolderName, setNewFolderName] = useState('')
   const [newFolderBusy, setNewFolderBusy] = useState(false)
   const [newFolderError, setNewFolderError] = useState<string | null>(null)
+  const [previewKey, setPreviewKey] = useState<string | null>(null)
+  const [previewState, setPreviewState] = useState<
+    | { status: 'idle' }
+    | { status: 'loading' }
+    | {
+        status: 'ready'
+        key: string
+        contentType: string
+        text: string
+        tempPath: string
+        wasTruncated: boolean
+      }
+    | { status: 'error'; message: string }
+  >({ status: 'idle' })
 
   const refreshAccounts = useCallback(async () => {
     const list = await window.bucketeer.accounts.list()
@@ -157,6 +257,8 @@ export default function App(): JSX.Element {
     setNewFolderName('')
     setNewFolderError(null)
     setFileDragOver(false)
+    setPreviewKey(null)
+    setPreviewState({ status: 'idle' })
   }, [selection?.accountId, selection?.bucket, prefix])
 
   const cancelRenameAccount = useCallback(() => {
@@ -470,6 +572,48 @@ export default function App(): JSX.Element {
     }
   }
 
+  const onOpenPreview = useCallback(
+    async (row: Extract<ListObjectsRow, { type: 'file' }>) => {
+      if (!selection) return
+      if (!row.name.toLowerCase().endsWith('.json')) {
+        setPreviewKey(row.key)
+        setPreviewState({ status: 'error', message: 'Preview is currently supported for JSON only.' })
+        return
+      }
+      if (typeof row.size === 'number' && row.size > PREVIEW_MAX_BYTES) {
+        setPreviewKey(row.key)
+        setPreviewState({
+          status: 'error',
+          message: `Preview is limited to ${Math.round(PREVIEW_MAX_BYTES / 1024)} KB. This file is ${formatBytes(row.size)}.`
+        })
+        return
+      }
+      setPreviewKey(row.key)
+      setPreviewState({ status: 'loading' })
+      try {
+        const result = await window.bucketeer.s3.getObjectPreview(
+          selection.accountId,
+          selection.bucket,
+          row.key
+        )
+        setPreviewState({
+          status: 'ready',
+          key: row.key,
+          contentType: result.contentType,
+          text: result.text,
+          tempPath: result.tempPath,
+          wasTruncated: result.wasTruncated
+        })
+      } catch (err) {
+        setPreviewState({
+          status: 'error',
+          message: err instanceof Error ? err.message : String(err)
+        })
+      }
+    },
+    [selection]
+  )
+
   const onCreateFolderSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!selection) return
@@ -537,6 +681,11 @@ export default function App(): JSX.Element {
       setRenameBusy(false)
     }
   }
+
+  const previewTokens = useMemo(() => {
+    if (previewState.status !== 'ready') return null
+    return tokenizeJsonForPreview(previewState.text)
+  }, [previewState])
 
   return (
     <div className="flex h-full flex-col">
@@ -819,8 +968,9 @@ export default function App(): JSX.Element {
                   </button>
                 </div>
               )}
-              <div className="min-h-0 flex-1 overflow-auto">
-                <table className="w-full border-collapse text-left text-sm">
+              <div className="flex min-h-0 flex-1">
+                <div className="min-w-0 flex-1 overflow-auto">
+                  <table className="w-full border-collapse text-left text-sm">
                   <thead className="sticky top-0 z-10 bg-[#121a24] text-xs uppercase text-slate-500">
                     <tr>
                       <th className="w-10 px-3 py-2" />
@@ -829,7 +979,7 @@ export default function App(): JSX.Element {
                       <th className="w-52 px-3 py-2">Modified</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-pane-border">
+                    <tbody className="divide-y divide-pane-border">
                     {objectsLoading && rows.length === 0 && (
                       <tr>
                         <td colSpan={4} className="px-3 py-8 text-center text-slate-500">
@@ -868,6 +1018,7 @@ export default function App(): JSX.Element {
                         )
                       }
                       const checked = selectedKeys.has(row.key)
+                      const previewActive = previewKey === row.key
                       return (
                         <tr
                           key={row.key}
@@ -891,10 +1042,19 @@ export default function App(): JSX.Element {
                             />
                           </td>
                           <td className="px-3 py-1.5">
-                            <span className="inline-flex items-center gap-2 text-slate-200">
+                            <button
+                              type="button"
+                              onClick={() => void onOpenPreview(row)}
+                              className={`inline-flex items-center gap-2 text-left ${
+                                previewActive
+                                  ? 'text-sky-300'
+                                  : 'text-slate-200 hover:text-white'
+                              }`}
+                              title="Open preview"
+                            >
                               <File className="h-4 w-4 text-slate-400" />
                               {row.name}
-                            </span>
+                            </button>
                           </td>
                           <td className="px-3 py-1.5 font-mono text-xs text-slate-400">
                             {formatBytes(row.size)}
@@ -905,8 +1065,59 @@ export default function App(): JSX.Element {
                         </tr>
                       )
                     })}
-                  </tbody>
-                </table>
+                    </tbody>
+                  </table>
+                </div>
+                {previewKey && (
+                  <aside className="w-[40%] min-w-[320px] max-w-[720px] shrink-0 border-l border-pane-border bg-[#0f1722]">
+                    <div className="flex items-center justify-between border-b border-pane-border px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-xs uppercase tracking-wide text-slate-500">Preview</p>
+                        <p className="truncate font-mono text-xs text-slate-300">{previewKey}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPreviewKey(null)
+                          setPreviewState({ status: 'idle' })
+                        }}
+                        className="rounded p-1 text-slate-400 hover:bg-pane-hover hover:text-slate-200"
+                        aria-label="Close preview"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                    <div className="h-full overflow-auto p-3">
+                      {previewState.status === 'loading' && (
+                        <div className="flex items-center gap-2 text-sm text-slate-400">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Loading preview...
+                        </div>
+                      )}
+                      {previewState.status === 'error' && (
+                        <p className="text-sm text-red-300">{previewState.message}</p>
+                      )}
+                      {previewState.status === 'ready' && (
+                        <div className="space-y-2">
+                          <p className="text-xs text-slate-500">
+                            {previewState.contentType}
+                            {previewState.wasTruncated ? ' · truncated to 512 KB for preview' : ''}
+                          </p>
+                          <pre className="json-preview overflow-auto rounded border border-pane-border bg-[#0b111b] p-3 text-xs leading-relaxed text-slate-200">
+                            {(previewTokens ?? []).map((token, idx) => (
+                              <span key={`${idx}-${token.type}`} className={`tok-${token.type}`}>
+                                {token.value}
+                              </span>
+                            ))}
+                          </pre>
+                          <p className="text-[11px] text-slate-600">
+                            Cached temporarily at: {previewState.tempPath}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </aside>
+                )}
               </div>
             </>
           )}
