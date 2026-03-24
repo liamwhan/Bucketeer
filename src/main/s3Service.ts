@@ -8,6 +8,7 @@ import {
   ListBucketsCommand,
   ListObjectsV2Command,
   GetObjectCommand,
+  GetBucketLocationCommand,
   CreateBucketCommand,
   CopyObjectCommand,
   DeleteObjectCommand,
@@ -18,6 +19,7 @@ import {
 import type { AwsAccount, ListObjectsRow, DownloadResult, UploadResult } from '../shared/types.js'
 
 const clientCache = new Map<string, S3Client>()
+const bucketRegionCache = new Map<string, string>()
 
 function clientFor(account: AwsAccount): S3Client {
   const cacheKey = `${account.id}:${account.region}:${account.accessKeyId}`
@@ -35,6 +37,46 @@ function clientFor(account: AwsAccount): S3Client {
   return c
 }
 
+function clientForRegion(account: AwsAccount, region: string): S3Client {
+  const normalizedRegion = region.trim()
+  const cacheKey = `${account.id}:${normalizedRegion}:${account.accessKeyId}`
+  let c = clientCache.get(cacheKey)
+  if (!c) {
+    c = new S3Client({
+      region: normalizedRegion,
+      credentials: {
+        accessKeyId: account.accessKeyId.trim(),
+        secretAccessKey: account.secretAccessKey
+      }
+    })
+    clientCache.set(cacheKey, c)
+  }
+  return c
+}
+
+function normalizeBucketRegion(raw: string | null | undefined): string {
+  if (!raw) return 'us-east-1'
+  if (raw === 'EU') return 'eu-west-1'
+  return raw
+}
+
+async function resolveBucketRegion(account: AwsAccount, bucket: string): Promise<string> {
+  const cacheKey = `${account.id}:${bucket}`
+  const cached = bucketRegionCache.get(cacheKey)
+  if (cached) return cached
+
+  const accountClient = clientFor(account)
+  const result = await accountClient.send(new GetBucketLocationCommand({ Bucket: bucket }))
+  const region = normalizeBucketRegion(result.LocationConstraint)
+  bucketRegionCache.set(cacheKey, region)
+  return region
+}
+
+async function clientForBucket(account: AwsAccount, bucket: string): Promise<S3Client> {
+  const region = await resolveBucketRegion(account, bucket)
+  return clientForRegion(account, region)
+}
+
 export function clearClientCache(accountId?: string): void {
   if (accountId) {
     for (const k of clientCache.keys()) {
@@ -42,9 +84,15 @@ export function clearClientCache(accountId?: string): void {
         clientCache.delete(k)
       }
     }
+    for (const k of bucketRegionCache.keys()) {
+      if (k.startsWith(`${accountId}:`)) {
+        bucketRegionCache.delete(k)
+      }
+    }
     return
   }
   clientCache.clear()
+  bucketRegionCache.clear()
 }
 
 export async function listBucketsForAccount(account: AwsAccount): Promise<Bucket[]> {
@@ -84,48 +132,61 @@ export async function listObjectsPage(
   bucket: string,
   prefix: string
 ): Promise<{ rows: ListObjectsRow[]; isTruncated: boolean }> {
-  const client = clientFor(account)
-  const res = await client.send(
-    new ListObjectsV2Command({
-      Bucket: bucket,
-      Prefix: prefix,
-      Delimiter: '/'
-    })
-  )
-
+  const client = await clientForBucket(account, bucket)
   const rows: ListObjectsRow[] = []
+  const seenFolders = new Set<string>()
+  const seenFiles = new Set<string>()
+  let continuationToken: string | undefined
+  let isTruncated = false
 
-  for (const cp of res.CommonPrefixes ?? []) {
-    const p = cp.Prefix ?? ''
-    const base = stripTrailingSlash(p)
-    const name = base.includes('/') ? base.slice(base.lastIndexOf('/') + 1) : base
-    if (name) {
-      rows.push({ type: 'folder', name, prefix: p })
+  do {
+    const res = await client.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        Delimiter: '/',
+        ContinuationToken: continuationToken
+      })
+    )
+
+    for (const cp of res.CommonPrefixes ?? []) {
+      const p = cp.Prefix ?? ''
+      if (!p || seenFolders.has(p)) continue
+      const base = stripTrailingSlash(p)
+      const name = base.includes('/') ? base.slice(base.lastIndexOf('/') + 1) : base
+      if (name) {
+        rows.push({ type: 'folder', name, prefix: p })
+        seenFolders.add(p)
+      }
     }
-  }
 
-  for (const obj of res.Contents ?? []) {
-    const key = obj.Key ?? ''
-    if (!key || key === prefix) continue
-    const relative = prefix ? key.slice(prefix.length) : key
-    if (relative.includes('/')) continue
-    const name = relative
-    if (!name) continue
-    rows.push({
-      type: 'file',
-      key,
-      name,
-      size: obj.Size,
-      lastModified: obj.LastModified?.toISOString()
-    })
-  }
+    for (const obj of res.Contents ?? []) {
+      const key = obj.Key ?? ''
+      if (!key || key === prefix || seenFiles.has(key)) continue
+      const relative = prefix ? key.slice(prefix.length) : key
+      if (relative.includes('/')) continue
+      const name = relative
+      if (!name) continue
+      rows.push({
+        type: 'file',
+        key,
+        name,
+        size: obj.Size,
+        lastModified: obj.LastModified?.toISOString()
+      })
+      seenFiles.add(key)
+    }
+
+    isTruncated = Boolean(res.IsTruncated)
+    continuationToken = res.NextContinuationToken
+  } while (continuationToken)
 
   rows.sort((a, b) => {
     if (a.type !== b.type) return a.type === 'folder' ? -1 : 1
     return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
   })
 
-  return { rows, isTruncated: Boolean(res.IsTruncated) }
+  return { rows, isTruncated }
 }
 
 async function ensureDirForFile(filePath: string): Promise<void> {
@@ -139,7 +200,7 @@ export async function downloadObjects(
   keys: string[],
   destDir: string
 ): Promise<DownloadResult[]> {
-  const client = clientFor(account)
+  const client = await clientForBucket(account, bucket)
   const results: DownloadResult[] = []
 
   for (const key of keys) {
@@ -194,7 +255,7 @@ export async function renameObject(
     return { newKey }
   }
 
-  const client = clientFor(account)
+  const client = await clientForBucket(account, bucket)
   const copySource = copySourceForKey(bucket, sourceKey)
 
   await client.send(
@@ -244,7 +305,7 @@ export async function createFolder(
     prefix === '' ? '' : prefix.endsWith('/') ? prefix : `${prefix}/`
   const key = `${normalizedPrefix}${segment}/`
 
-  const client = clientFor(account)
+  const client = await clientForBucket(account, bucket)
   await client.send(
     new PutObjectCommand({
       Bucket: bucket,
@@ -266,7 +327,7 @@ export async function uploadLocalFiles(
 ): Promise<UploadResult[]> {
   const normalizedPrefix =
     prefix === '' ? '' : prefix.endsWith('/') ? prefix : `${prefix}/`
-  const client = clientFor(account)
+  const client = await clientForBucket(account, bucket)
   const results: UploadResult[] = []
 
   for (const localPath of localPaths) {

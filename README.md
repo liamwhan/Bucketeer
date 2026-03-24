@@ -40,7 +40,7 @@ If you’ve ever thought *“I just need Cyberduck, but S3-native and hackable�
 - **New folder** — Creates the usual S3 “folder” object (`key/`).
 - **Rename object** — Copy-to-new-key + delete-original (same parent prefix); surfaces partial-failure if delete fails after copy.
 - **Account management** — Add, remove, and inline-edit friendly **labels**; update keys/regions as needed.
-- **Honest UX** — When AWS returns a truncated listing (1000 keys per request), the UI tells you—no silent cutoffs.
+- **Scales past 1000 objects** — Folder listings automatically follow S3 continuation tokens, so large prefixes load completely.
 
 ---
 
@@ -108,7 +108,6 @@ src/
 
 These are intentional transparency, not excuses—they’re great **first PR** opportunities:
 
-- **Listing pagination** — Large folders may hit S3’s **1000 keys per request** cap; the UI warns when `IsTruncated` is true. Full continuation-token pagination can be added in `s3:listObjects`.
 - **Rename** — Implemented as single **CopyObject** + **DeleteObject**; objects **over 5 GB** would need multipart copy (not implemented).
 - **Upload** — Files only (not recursive directory upload); folder drops are not a full tree mirror.
 
@@ -130,7 +129,7 @@ These are intentional transparency, not excuses—they’re great **first PR** o
 
 ## Contributing
 
-Issues and PRs are welcome—whether that’s **pagination**, **packaging**, **S3-compatible endpoints**, or **UI polish**. Please keep changes focused and consistent with existing patterns (typed IPC, small main-process surface).
+Issues and PRs are welcome—whether that’s **packaging**, **S3-compatible endpoints**, or **UI polish**. Please keep changes focused and consistent with existing patterns (typed IPC, small main-process surface).
 
 ---
 

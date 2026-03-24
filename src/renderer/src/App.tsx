@@ -797,8 +797,8 @@ export default function App(): JSX.Element {
               </div>
               {truncated && (
                 <div className="border-b border-amber-900/50 bg-amber-950/30 px-3 py-1.5 text-xs text-amber-200/90">
-                  This listing is truncated by AWS (max 1000 keys per request). Pagination can be
-                  added later.
+                  AWS returned a truncated page and Bucketeer could not load the full listing.
+                  Try refreshing this folder.
                 </div>
               )}
               {objectsError && (
