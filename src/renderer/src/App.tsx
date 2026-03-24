@@ -41,7 +41,108 @@ function formatDate(iso: string | undefined): string {
   }
 }
 
-const PREVIEW_MAX_BYTES = 512 * 1024
+const PREVIEW_MAX_BYTES = 2 * 1024 * 1024
+
+type EditableFormatId = 'json' | 'yaml' | 'xml'
+type SaveValidation =
+  | { ok: true; normalizedText: string; contentType: string }
+  | { ok: false; message: string }
+type EditableFormatStrategy = {
+  id: EditableFormatId
+  label: string
+  extensions: string[]
+  previewContentTypeIncludes: string[]
+  defaultContentType: string
+  previewRenderer: (raw: string) => JsonToken[]
+  validateAndNormalizeForSave: (draft: string) => SaveValidation
+}
+
+const EDITABLE_FORMAT_STRATEGIES: EditableFormatStrategy[] = [
+  {
+    id: 'json',
+    label: 'JSON',
+    extensions: ['.json'],
+    previewContentTypeIncludes: ['application/json', 'text/json'],
+    defaultContentType: 'application/json; charset=utf-8',
+    previewRenderer: (raw) => tokenizeJsonForPreview(raw),
+    validateAndNormalizeForSave: (draft) => {
+      if (!draft.trim()) {
+        return { ok: false, message: 'JSON cannot be empty.' }
+      }
+      try {
+        const normalizedText = JSON.stringify(JSON.parse(draft), null, 2)
+        return {
+          ok: true,
+          normalizedText,
+          contentType: 'application/json; charset=utf-8'
+        }
+      } catch {
+        return { ok: false, message: 'Invalid JSON. Fix errors before saving.' }
+      }
+    }
+  },
+  // Intentional placeholders so future contributors can extend this without redesigning flow.
+  {
+    id: 'yaml',
+    label: 'YAML',
+    extensions: ['.yaml', '.yml'],
+    previewContentTypeIncludes: ['application/yaml', 'text/yaml'],
+    defaultContentType: 'application/yaml; charset=utf-8',
+    previewRenderer: (raw) => [{ type: 'plain', value: raw }],
+    validateAndNormalizeForSave: () => ({
+      ok: false,
+      message: 'YAML editing is not supported yet.'
+    })
+  },
+  {
+    id: 'xml',
+    label: 'XML',
+    extensions: ['.xml'],
+    previewContentTypeIncludes: ['application/xml', 'text/xml'],
+    defaultContentType: 'application/xml; charset=utf-8',
+    previewRenderer: (raw) => [{ type: 'plain', value: raw }],
+    validateAndNormalizeForSave: () => ({
+      ok: false,
+      message: 'XML editing is not supported yet.'
+    })
+  }
+]
+
+function strategyForFileName(fileName: string): EditableFormatStrategy | null {
+  const lower = fileName.toLowerCase()
+  return EDITABLE_FORMAT_STRATEGIES.find((s) => s.extensions.some((ext) => lower.endsWith(ext))) ?? null
+}
+
+function strategyForPreview(contentType: string, key: string): EditableFormatStrategy | null {
+  const byName = strategyForFileName(key)
+  if (byName) return byName
+  const lowerContentType = contentType.toLowerCase()
+  return (
+    EDITABLE_FORMAT_STRATEGIES.find((s) =>
+      s.previewContentTypeIncludes.some((needle) => lowerContentType.includes(needle))
+    ) ?? null
+  )
+}
+
+function isPdfFileName(fileName: string): boolean {
+  return fileName.toLowerCase().endsWith('.pdf')
+}
+
+function isPdfPreview(contentType: string, key: string): boolean {
+  if (isPdfFileName(key)) return true
+  return contentType.toLowerCase().includes('application/pdf')
+}
+
+function toFileUrl(localPath: string): string {
+  const normalized = localPath.replace(/\\/g, '/')
+  if (/^[a-zA-Z]:\//.test(normalized)) {
+    return `file:///${encodeURI(normalized)}`
+  }
+  if (normalized.startsWith('/')) {
+    return `file://${encodeURI(normalized)}`
+  }
+  return `file://${encodeURI(`/${normalized}`)}`
+}
 
 type Selection = { accountId: string; bucket: string }
 
@@ -203,6 +304,10 @@ export default function App(): JSX.Element {
       }
     | { status: 'error'; message: string }
   >({ status: 'idle' })
+  const [previewEditMode, setPreviewEditMode] = useState(false)
+  const [previewDraft, setPreviewDraft] = useState('')
+  const [previewSaveBusy, setPreviewSaveBusy] = useState(false)
+  const [previewActionError, setPreviewActionError] = useState<string | null>(null)
 
   const refreshAccounts = useCallback(async () => {
     const list = await window.bucketeer.accounts.list()
@@ -259,6 +364,10 @@ export default function App(): JSX.Element {
     setFileDragOver(false)
     setPreviewKey(null)
     setPreviewState({ status: 'idle' })
+    setPreviewEditMode(false)
+    setPreviewDraft('')
+    setPreviewSaveBusy(false)
+    setPreviewActionError(null)
   }, [selection?.accountId, selection?.bucket, prefix])
 
   const cancelRenameAccount = useCallback(() => {
@@ -563,10 +672,16 @@ export default function App(): JSX.Element {
       if (fail.length === 0) {
         setStatusMsg(`Downloaded ${ok} object(s) to folder.`)
       } else {
+        const details = fail
+          .map((f) => `${f.key} (${f.error})`)
+          .slice(0, 3)
+          .join('; ')
         setStatusMsg(
-          `Downloaded ${ok} object(s). ${fail.length} failed: ${fail.map((f) => f.key).join(', ')}`
+          `Downloaded ${ok} object(s). ${fail.length} failed: ${details}${fail.length > 3 ? '; ...' : ''}`
         )
       }
+    } catch (err) {
+      setStatusMsg(err instanceof Error ? `Download failed: ${err.message}` : `Download failed: ${String(err)}`)
     } finally {
       setDownloadBusy(false)
     }
@@ -575,21 +690,34 @@ export default function App(): JSX.Element {
   const onOpenPreview = useCallback(
     async (row: Extract<ListObjectsRow, { type: 'file' }>) => {
       if (!selection) return
-      if (!row.name.toLowerCase().endsWith('.json')) {
+      const strategy = strategyForFileName(row.name)
+      const canPreviewAsPdf = isPdfFileName(row.name)
+      if (!canPreviewAsPdf && (!strategy || strategy.id !== 'json')) {
         setPreviewKey(row.key)
-        setPreviewState({ status: 'error', message: 'Preview is currently supported for JSON only.' })
+        setPreviewState({
+          status: 'error',
+          message: 'Preview is currently supported for JSON and PDF files.'
+        })
+        setPreviewEditMode(false)
+        setPreviewDraft('')
+        setPreviewSaveBusy(false)
+        setPreviewActionError(null)
         return
       }
       if (typeof row.size === 'number' && row.size > PREVIEW_MAX_BYTES) {
         setPreviewKey(row.key)
         setPreviewState({
           status: 'error',
-          message: `Preview is limited to ${Math.round(PREVIEW_MAX_BYTES / 1024)} KB. This file is ${formatBytes(row.size)}.`
+          message: `Preview is limited to ${Math.round(PREVIEW_MAX_BYTES / (1024 * 1024))} MB. This file is ${formatBytes(row.size)}.`
         })
         return
       }
       setPreviewKey(row.key)
       setPreviewState({ status: 'loading' })
+      setPreviewEditMode(false)
+      setPreviewDraft('')
+      setPreviewSaveBusy(false)
+      setPreviewActionError(null)
       try {
         const result = await window.bucketeer.s3.getObjectPreview(
           selection.accountId,
@@ -604,6 +732,7 @@ export default function App(): JSX.Element {
           tempPath: result.tempPath,
           wasTruncated: result.wasTruncated
         })
+        setPreviewDraft(result.text)
       } catch (err) {
         setPreviewState({
           status: 'error',
@@ -614,6 +743,80 @@ export default function App(): JSX.Element {
     [selection]
   )
 
+  const previewDirty = previewState.status === 'ready' && previewEditMode && previewDraft !== previewState.text
+
+  const confirmDiscardPreviewChanges = useCallback(() => {
+    if (!previewDirty) return true
+    return confirm('Discard unsaved preview edits?')
+  }, [previewDirty])
+
+  const closePreviewPane = useCallback(() => {
+    if (!confirmDiscardPreviewChanges()) return
+    setPreviewKey(null)
+    setPreviewState({ status: 'idle' })
+    setPreviewEditMode(false)
+    setPreviewDraft('')
+    setPreviewSaveBusy(false)
+    setPreviewActionError(null)
+  }, [confirmDiscardPreviewChanges])
+
+  const onStartPreviewEdit = useCallback(() => {
+    if (previewState.status !== 'ready') return
+    setPreviewEditMode(true)
+    setPreviewDraft(previewState.text)
+    setPreviewActionError(null)
+  }, [previewState])
+
+  const onCancelPreviewEdit = useCallback(() => {
+    if (!confirmDiscardPreviewChanges()) return
+    if (previewState.status === 'ready') {
+      setPreviewDraft(previewState.text)
+    } else {
+      setPreviewDraft('')
+    }
+    setPreviewEditMode(false)
+    setPreviewActionError(null)
+  }, [confirmDiscardPreviewChanges, previewState])
+
+  const onSavePreview = useCallback(async () => {
+    if (!selection || previewState.status !== 'ready') return
+    const strategy = strategyForPreview(previewState.contentType, previewState.key)
+    if (!strategy) {
+      setPreviewActionError('No editable strategy is registered for this file type yet.')
+      return
+    }
+    const validation = strategy.validateAndNormalizeForSave(previewDraft)
+    if (!validation.ok) {
+      setPreviewActionError(validation.message)
+      return
+    }
+    const ok = confirm(`Write ${strategy.label} changes back to S3 for "${previewState.key}"?`)
+    if (!ok) return
+    setPreviewSaveBusy(true)
+    setPreviewActionError(null)
+    try {
+      await window.bucketeer.s3.putObjectText(
+        selection.accountId,
+        selection.bucket,
+        previewState.key,
+        validation.normalizedText,
+        validation.contentType || strategy.defaultContentType
+      )
+      setPreviewState({
+        ...previewState,
+        text: validation.normalizedText
+      })
+      setPreviewDraft(validation.normalizedText)
+      setPreviewEditMode(false)
+      setStatusMsg(`Saved changes to "${previewState.key}".`)
+      await loadObjects(selection, prefix)
+    } catch (err) {
+      setPreviewActionError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setPreviewSaveBusy(false)
+    }
+  }, [loadObjects, prefix, previewDraft, previewState, selection])
+
   const onCreateFolderSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!selection) return
@@ -622,21 +825,7 @@ export default function App(): JSX.Element {
     setNewFolderBusy(true)
     setNewFolderError(null)
     try {
-      const b = window.bucketeer
-      if (typeof b.invoke === 'function') {
-        await b.invoke('s3:createFolder', selection.accountId, selection.bucket, prefix, name)
-      } else if (typeof b.s3.createFolder === 'function') {
-        await b.s3.createFolder(
-          selection.accountId,
-          selection.bucket,
-          prefix,
-          name
-        )
-      } else {
-        throw new Error(
-          'Preload script is out of date (createFolder missing). Fully quit Bucketeer (all windows) and start again with npm run dev so Electron reloads the preload bundle.'
-        )
-      }
+      await window.bucketeer.s3.createFolder(selection.accountId, selection.bucket, prefix, name)
       setNewFolderOpen(false)
       setNewFolderName('')
       await loadObjects(selection, prefix)
@@ -684,7 +873,9 @@ export default function App(): JSX.Element {
 
   const previewTokens = useMemo(() => {
     if (previewState.status !== 'ready') return null
-    return tokenizeJsonForPreview(previewState.text)
+    const strategy = strategyForPreview(previewState.contentType, previewState.key)
+    if (!strategy) return [{ type: 'plain', value: previewState.text }]
+    return strategy.previewRenderer(previewState.text)
   }, [previewState])
 
   return (
@@ -1044,7 +1235,10 @@ export default function App(): JSX.Element {
                           <td className="px-3 py-1.5">
                             <button
                               type="button"
-                              onClick={() => void onOpenPreview(row)}
+                              onClick={() => {
+                                if (!confirmDiscardPreviewChanges()) return
+                                void onOpenPreview(row)
+                              }}
                               className={`inline-flex items-center gap-2 text-left ${
                                 previewActive
                                   ? 'text-sky-300'
@@ -1077,10 +1271,7 @@ export default function App(): JSX.Element {
                       </div>
                       <button
                         type="button"
-                        onClick={() => {
-                          setPreviewKey(null)
-                          setPreviewState({ status: 'idle' })
-                        }}
+                        onClick={closePreviewPane}
                         className="rounded p-1 text-slate-400 hover:bg-pane-hover hover:text-slate-200"
                         aria-label="Close preview"
                       >
@@ -1099,17 +1290,71 @@ export default function App(): JSX.Element {
                       )}
                       {previewState.status === 'ready' && (
                         <div className="space-y-2">
-                          <p className="text-xs text-slate-500">
-                            {previewState.contentType}
-                            {previewState.wasTruncated ? ' · truncated to 512 KB for preview' : ''}
-                          </p>
-                          <pre className="json-preview overflow-auto rounded border border-pane-border bg-[#0b111b] p-3 text-xs leading-relaxed text-slate-200">
-                            {(previewTokens ?? []).map((token, idx) => (
-                              <span key={`${idx}-${token.type}`} className={`tok-${token.type}`}>
-                                {token.value}
-                              </span>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-xs text-slate-500">
+                              {previewState.contentType}
+                              {previewState.wasTruncated ? ' · truncated to 2 MB for preview' : ''}
+                            </p>
+                            {!previewEditMode &&
+                            !isPdfPreview(previewState.contentType, previewState.key) ? (
+                              <button
+                                type="button"
+                                onClick={onStartPreviewEdit}
+                                className="rounded border border-pane-border px-2 py-1 text-xs text-slate-200 hover:bg-pane-hover"
+                              >
+                                Edit JSON
+                              </button>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => void onSavePreview()}
+                                  disabled={previewSaveBusy || !previewDirty}
+                                  className="inline-flex items-center gap-1 rounded bg-emerald-700 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  {previewSaveBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                                  Save to S3
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={onCancelPreviewEdit}
+                                  disabled={previewSaveBusy}
+                                  className="rounded border border-pane-border px-2 py-1 text-xs text-slate-200 hover:bg-pane-hover disabled:opacity-50"
+                                >
+                                  Cancel
+                                </button>
+                              </>
+                            )}
+                          </div>
+                          {previewActionError && (
+                            <p className="rounded border border-red-900/50 bg-red-950/30 px-2 py-1.5 text-xs text-red-300">
+                              {previewActionError}
+                            </p>
+                          )}
+                          {!previewEditMode &&
+                            (isPdfPreview(previewState.contentType, previewState.key) ? (
+                              <iframe
+                                src={toFileUrl(previewState.tempPath)}
+                                title={`PDF preview for ${previewState.key}`}
+                                className="h-[65vh] w-full rounded border border-pane-border bg-[#0b111b]"
+                              />
+                            ) : (
+                              <pre className="json-preview overflow-auto rounded border border-pane-border bg-[#0b111b] p-3 text-xs leading-relaxed text-slate-200">
+                                {(previewTokens ?? []).map((token, idx) => (
+                                  <span key={`${idx}-${token.type}`} className={`tok-${token.type}`}>
+                                    {token.value}
+                                  </span>
+                                ))}
+                              </pre>
                             ))}
-                          </pre>
+                          {previewEditMode && (
+                            <textarea
+                              value={previewDraft}
+                              onChange={(e) => setPreviewDraft(e.target.value)}
+                              spellCheck={false}
+                              className="h-[65vh] w-full resize-y rounded border border-pane-border bg-[#0b111b] p-3 font-mono text-xs leading-relaxed text-slate-200 outline-none focus:border-sky-600"
+                            />
+                          )}
                           <p className="text-[11px] text-slate-600">
                             Cached temporarily at: {previewState.tempPath}
                           </p>

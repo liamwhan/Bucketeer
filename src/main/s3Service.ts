@@ -1,9 +1,10 @@
-import { mkdir, createWriteStream, createReadStream } from 'fs'
-import { mkdtemp, readFile, stat, writeFile } from 'fs/promises'
+import { createWriteStream, createReadStream } from 'fs'
+import { mkdir, mkdtemp, readFile, stat, writeFile, rm } from 'fs/promises'
 import { tmpdir } from 'os'
-import { basename, dirname, join } from 'path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'path'
 import { pipeline } from 'stream/promises'
-import type { Readable } from 'stream'
+import { Transform, type Readable } from 'stream'
+import { createHash } from 'crypto'
 import {
   S3Client,
   ListBucketsCommand,
@@ -27,6 +28,8 @@ import type {
 
 const clientCache = new Map<string, S3Client>()
 const bucketRegionCache = new Map<string, string>()
+const previewCleanupTimers = new Map<string, NodeJS.Timeout>()
+const PREVIEW_TTL_MS = 15 * 60 * 1000
 
 function clientFor(account: AwsAccount): S3Client {
   const cacheKey = `${account.id}:${account.region}:${account.accessKeyId}`
@@ -201,6 +204,81 @@ async function ensureDirForFile(filePath: string): Promise<void> {
   await mkdir(d, { recursive: true })
 }
 
+function assertSafeDownloadKey(key: string): string[] {
+  const normalized = key.trim()
+  if (!normalized) {
+    throw new Error('Object key cannot be empty')
+  }
+  if (normalized.includes('\\')) {
+    throw new Error(`Object key "${key}" contains unsupported path separators`)
+  }
+
+  const parts = normalized.split('/').filter(Boolean)
+  if (parts.length === 0) {
+    throw new Error(`Object key "${key}" does not map to a file path`)
+  }
+
+  for (const part of parts) {
+    if (part === '.' || part === '..') {
+      throw new Error(`Object key "${key}" contains path traversal segments`)
+    }
+    if (part.includes('\0')) {
+      throw new Error(`Object key "${key}" contains invalid characters`)
+    }
+    if (isAbsolute(part) || /^[a-zA-Z]:/.test(part)) {
+      throw new Error(`Object key "${key}" contains an absolute path segment`)
+    }
+  }
+  return parts
+}
+
+function safeDownloadPath(destDir: string, key: string): string {
+  const destBase = resolve(destDir)
+  const parts = assertSafeDownloadKey(key)
+  const targetPath = resolve(destBase, ...parts)
+  const rel = relative(destBase, targetPath)
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`Object key "${key}" resolves outside the destination folder`)
+  }
+  return targetPath
+}
+
+async function streamWithIntegrityChecks(
+  body: Readable,
+  targetPath: string,
+  expectedSize?: number,
+  expectedSha256Base64?: string
+): Promise<void> {
+  let bytesWritten = 0
+  const hash = createHash('sha256')
+
+  const meter = new Transform({
+    transform(chunk, _, callback) {
+      const buff = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      bytesWritten += buff.length
+      hash.update(buff)
+      callback(null, buff)
+    }
+  })
+
+  await pipeline(body, meter, createWriteStream(targetPath))
+
+  if (typeof expectedSize === 'number' && Number.isFinite(expectedSize) && expectedSize >= 0) {
+    if (bytesWritten !== expectedSize) {
+      throw new Error(
+        `Downloaded size mismatch: expected ${expectedSize} bytes but wrote ${bytesWritten} bytes`
+      )
+    }
+  }
+
+  if (expectedSha256Base64 && expectedSha256Base64.trim()) {
+    const digest = hash.digest('base64')
+    if (digest !== expectedSha256Base64.trim()) {
+      throw new Error('Downloaded content checksum verification failed')
+    }
+  }
+}
+
 export async function downloadObjects(
   account: AwsAccount,
   bucket: string,
@@ -209,18 +287,26 @@ export async function downloadObjects(
 ): Promise<DownloadResult[]> {
   const client = await clientForBucket(account, bucket)
   const results: DownloadResult[] = []
+  const destStat = await stat(destDir)
+  if (!destStat.isDirectory()) {
+    throw new Error('Destination path must be an existing directory')
+  }
 
   for (const key of keys) {
-    const parts = key.split('/').filter(Boolean)
-    const targetPath = join(destDir.replace(/[/\\]$/, ''), ...parts)
     try {
+      const targetPath = safeDownloadPath(destDir.replace(/[/\\]$/, ''), key)
       await ensureDirForFile(targetPath)
       const res = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }))
       const body = res.Body
       if (!body) {
         throw new Error('Empty response body')
       }
-      await pipeline(body as Readable, createWriteStream(targetPath))
+      await streamWithIntegrityChecks(
+        body as Readable,
+        targetPath,
+        res.ContentLength,
+        res.ChecksumSHA256
+      )
       results.push({ key, ok: true, path: targetPath })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -369,11 +455,35 @@ export async function uploadLocalFiles(
   return results
 }
 
-const PREVIEW_MAX_BYTES = 512 * 1024
+const PREVIEW_MAX_BYTES = 2 * 1024 * 1024
+
+function schedulePreviewCleanup(tempPath: string): void {
+  const existing = previewCleanupTimers.get(tempPath)
+  if (existing) {
+    clearTimeout(existing)
+  }
+  const timer = setTimeout(() => {
+    void rm(tempPath, { force: true })
+    void rm(dirname(tempPath), { recursive: true, force: true })
+    previewCleanupTimers.delete(tempPath)
+  }, PREVIEW_TTL_MS)
+  timer.unref()
+  previewCleanupTimers.set(tempPath, timer)
+}
+
+export async function cleanupPreviewCache(): Promise<void> {
+  for (const [tempPath, timer] of previewCleanupTimers.entries()) {
+    clearTimeout(timer)
+    previewCleanupTimers.delete(tempPath)
+    await rm(tempPath, { force: true })
+    await rm(dirname(tempPath), { recursive: true, force: true })
+  }
+}
 
 function inferContentTypeFromKey(key: string): string {
   const lower = key.toLowerCase()
   if (lower.endsWith('.json')) return 'application/json'
+  if (lower.endsWith('.pdf')) return 'application/pdf'
   return 'application/octet-stream'
 }
 
@@ -401,18 +511,22 @@ export async function getObjectPreview(
   await pipeline(body as Readable, createWriteStream(tempPath))
   const raw = await readFile(tempPath)
   const contentType = res.ContentType || inferContentTypeFromKey(key)
-  const text = raw.toString('utf8')
+  const text = contentType.toLowerCase().includes('application/pdf') ? '' : raw.toString('utf8')
   const contentRange = res.ContentRange ?? ''
   const totalMatch = /\/(\d+)$/.exec(contentRange)
   const totalBytes = totalMatch ? Number(totalMatch[1]) : Number.NaN
   const wasTruncated = Number.isFinite(totalBytes)
     ? totalBytes > PREVIEW_MAX_BYTES
     : raw.length >= PREVIEW_MAX_BYTES
+  if (wasTruncated) {
+    throw new Error(`Preview is limited to ${Math.round(PREVIEW_MAX_BYTES / (1024 * 1024))} MB.`)
+  }
 
   if (contentType.includes('application/json')) {
     try {
       const pretty = JSON.stringify(JSON.parse(text), null, 2)
       await writeFile(tempPath, pretty, 'utf8')
+      schedulePreviewCleanup(tempPath)
       return {
         key,
         tempPath,
@@ -431,6 +545,7 @@ export async function getObjectPreview(
     }
   }
 
+  schedulePreviewCleanup(tempPath)
   return {
     key,
     tempPath,
@@ -438,4 +553,24 @@ export async function getObjectPreview(
     text,
     wasTruncated
   }
+}
+
+export async function putObjectText(
+  account: AwsAccount,
+  bucket: string,
+  key: string,
+  text: string,
+  contentType: string
+): Promise<{ key: string; eTag: string | undefined }> {
+  const client = await clientForBucket(account, bucket)
+  const body = Buffer.from(text, 'utf8')
+  const out = await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: body,
+      ContentType: contentType
+    })
+  )
+  return { key, eTag: out.ETag }
 }

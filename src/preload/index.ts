@@ -2,7 +2,6 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { AwsAccount } from '../shared/types.js'
 
 const api = {
-  invoke: (channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args),
   pathFromFile: (file: File) => webUtils.getPathForFile(file),
   accounts: {
     list: (): Promise<AwsAccount[]> => ipcRenderer.invoke('accounts:list'),
@@ -31,7 +30,14 @@ const api = {
       localPaths: string[]
     ) => ipcRenderer.invoke('s3:uploadLocalFiles', accountId, bucket, prefix, localPaths),
     getObjectPreview: (accountId: string, bucket: string, key: string) =>
-      ipcRenderer.invoke('s3:getObjectPreview', accountId, bucket, key)
+      ipcRenderer.invoke('s3:getObjectPreview', accountId, bucket, key),
+    putObjectText: (
+      accountId: string,
+      bucket: string,
+      key: string,
+      text: string,
+      contentType: string
+    ) => ipcRenderer.invoke('s3:putObjectText', accountId, bucket, key, text, contentType)
   }
 }
 

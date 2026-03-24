@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { existsSync } from 'fs'
+import { stat } from 'fs/promises'
 import { join } from 'path'
 
 function resolveWindowIcon(): string | undefined {
@@ -27,6 +28,61 @@ import * as accountsStore from './accountsStore.js'
 import * as s3 from './s3Service.js'
 import type { AwsAccount, UploadResult } from '../shared/types.js'
 
+const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['https:', 'mailto:'])
+const DEV_ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1'])
+
+function parseUrl(input: string): URL | null {
+  try {
+    return new URL(input)
+  } catch {
+    return null
+  }
+}
+
+function isSafeExternalUrl(raw: string): boolean {
+  const url = parseUrl(raw)
+  if (!url) return false
+  return ALLOWED_EXTERNAL_PROTOCOLS.has(url.protocol)
+}
+
+function isSafeRendererDevUrl(raw: string): boolean {
+  const url = parseUrl(raw)
+  if (!url) return false
+  if (!['http:', 'https:'].includes(url.protocol)) return false
+  return DEV_ALLOWED_HOSTS.has(url.hostname)
+}
+
+function assertString(value: unknown, field: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(`${field} must be a string`)
+  }
+  const trimmed = value.trim()
+  if (!trimmed) {
+    throw new Error(`${field} is required`)
+  }
+  return trimmed
+}
+
+function assertStringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${field} must be a string array`)
+  }
+  const out = value.map((item, idx) => assertString(item, `${field}[${idx}]`))
+  if (out.length === 0) {
+    throw new Error(`${field} must include at least one item`)
+  }
+  return out
+}
+
+async function assertExistingDirectory(pathValue: unknown, field: string): Promise<string> {
+  const dir = assertString(pathValue, field)
+  const dirStat = await stat(dir)
+  if (!dirStat.isDirectory()) {
+    throw new Error(`${field} must be a directory`)
+  }
+  return dir
+}
+
 function preloadScriptPath(): string {
   const dir = join(__dirname, '../preload')
   const candidates = ['index.js', 'index.mjs', 'index.cjs']
@@ -49,6 +105,7 @@ function createWindow(): void {
     ...(icon ? { icon } : {}),
     webPreferences: {
       preload: preloadScriptPath(),
+      // Keep sandbox off for now: current preload output is ESM and fails to load when sandboxed.
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false
@@ -60,12 +117,58 @@ function createWindow(): void {
   })
 
   win.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    if (isSafeExternalUrl(details.url)) {
+      void shell.openExternal(details.url)
+    }
     return { action: 'deny' }
   })
 
+  win.webContents.on('will-navigate', (event, navigationUrl) => {
+    const loaded = win.webContents.getURL()
+    if (!loaded) {
+      event.preventDefault()
+      return
+    }
+    const currentOrigin = parseUrl(loaded)?.origin
+    const nextOrigin = parseUrl(navigationUrl)?.origin
+    if (!currentOrigin || !nextOrigin || currentOrigin !== nextOrigin) {
+      event.preventDefault()
+    }
+  })
+
+  if (!process.env['ELECTRON_RENDERER_URL']) {
+    win.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+      if (details.resourceType !== 'mainFrame') {
+        callback({ responseHeaders: details.responseHeaders })
+        return
+      }
+      const csp = [
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: file:",
+        "connect-src 'self' https://*.amazonaws.com https://s3.amazonaws.com",
+        "font-src 'self' data:",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "frame-ancestors 'none'",
+        "form-action 'none'"
+      ].join('; ')
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          'Content-Security-Policy': [csp]
+        }
+      })
+    })
+  }
+
   if (process.env['ELECTRON_RENDERER_URL']) {
-    win.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    const rendererUrl = process.env['ELECTRON_RENDERER_URL']
+    if (!rendererUrl || !isSafeRendererDevUrl(rendererUrl)) {
+      throw new Error('ELECTRON_RENDERER_URL must point to a local development origin')
+    }
+    win.loadURL(rendererUrl)
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
@@ -87,34 +190,51 @@ app.whenReady().then(() => {
   ipcMain.handle('accounts:list', () => accountsStore.listAccounts())
 
   ipcMain.handle('accounts:add', (_, input: Omit<AwsAccount, 'id'>) => {
-    return accountsStore.addAccount(input)
+    return accountsStore.addAccount({
+      label: assertString(input.label, 'label'),
+      accessKeyId: assertString(input.accessKeyId, 'accessKeyId'),
+      secretAccessKey: assertString(input.secretAccessKey, 'secretAccessKey'),
+      region: assertString(input.region, 'region')
+    })
   })
 
   ipcMain.handle('accounts:update', (_, account: AwsAccount) => {
-    accountsStore.updateAccount(account)
-    s3.clearClientCache(account.id)
+    const nextAccount: AwsAccount = {
+      id: assertString(account.id, 'id'),
+      label: assertString(account.label, 'label'),
+      accessKeyId: assertString(account.accessKeyId, 'accessKeyId'),
+      secretAccessKey: assertString(account.secretAccessKey, 'secretAccessKey'),
+      region: assertString(account.region, 'region')
+    }
+    accountsStore.updateAccount(nextAccount)
+    s3.clearClientCache(nextAccount.id)
   })
 
   ipcMain.handle('accounts:remove', (_, id: string) => {
-    accountsStore.removeAccount(id)
-    s3.clearClientCache(id)
+    const accountId = assertString(id, 'accountId')
+    accountsStore.removeAccount(accountId)
+    s3.clearClientCache(accountId)
   })
 
   ipcMain.handle('s3:listBuckets', async (_, accountId: string) => {
-    const account = getAccountOrThrow(accountId)
+    const account = getAccountOrThrow(assertString(accountId, 'accountId'))
     return s3.listBucketsForAccount(account)
   })
 
   ipcMain.handle('s3:createBucket', async (_, accountId: string, bucketName: string) => {
-    const account = getAccountOrThrow(accountId)
-    await s3.createBucket(account, bucketName)
+    const account = getAccountOrThrow(assertString(accountId, 'accountId'))
+    await s3.createBucket(account, assertString(bucketName, 'bucketName'))
   })
 
   ipcMain.handle(
     's3:listObjects',
     async (_, accountId: string, bucket: string, prefix: string) => {
-      const account = getAccountOrThrow(accountId)
-      return s3.listObjectsPage(account, bucket, prefix)
+      const account = getAccountOrThrow(assertString(accountId, 'accountId'))
+      return s3.listObjectsPage(
+        account,
+        assertString(bucket, 'bucket'),
+        typeof prefix === 'string' ? prefix : ''
+      )
     }
   )
 
@@ -129,8 +249,11 @@ app.whenReady().then(() => {
   ipcMain.handle(
     's3:downloadObjects',
     async (_, accountId: string, bucket: string, keys: string[], destDir: string) => {
-      const account = getAccountOrThrow(accountId)
-      return s3.downloadObjects(account, bucket, keys, destDir)
+      const account = getAccountOrThrow(assertString(accountId, 'accountId'))
+      const normalizedBucket = assertString(bucket, 'bucket')
+      const normalizedKeys = assertStringArray(keys, 'keys')
+      const normalizedDestDir = await assertExistingDirectory(destDir, 'destDir')
+      return s3.downloadObjects(account, normalizedBucket, normalizedKeys, normalizedDestDir)
     }
   )
 
@@ -143,8 +266,13 @@ app.whenReady().then(() => {
       sourceKey: string,
       newFileName: string
     ): Promise<{ newKey: string }> => {
-      const account = getAccountOrThrow(accountId)
-      return s3.renameObject(account, bucket, sourceKey, newFileName)
+      const account = getAccountOrThrow(assertString(accountId, 'accountId'))
+      return s3.renameObject(
+        account,
+        assertString(bucket, 'bucket'),
+        assertString(sourceKey, 'sourceKey'),
+        assertString(newFileName, 'newFileName')
+      )
     }
   )
 
@@ -157,8 +285,13 @@ app.whenReady().then(() => {
       prefix: string,
       folderName: string
     ): Promise<{ key: string }> => {
-      const account = getAccountOrThrow(accountId)
-      return s3.createFolder(account, bucket, prefix, folderName)
+      const account = getAccountOrThrow(assertString(accountId, 'accountId'))
+      return s3.createFolder(
+        account,
+        assertString(bucket, 'bucket'),
+        typeof prefix === 'string' ? prefix : '',
+        assertString(folderName, 'folderName')
+      )
     }
   )
 
@@ -171,16 +304,42 @@ app.whenReady().then(() => {
       prefix: string,
       localPaths: string[]
     ): Promise<UploadResult[]> => {
-      const account = getAccountOrThrow(accountId)
-      return s3.uploadLocalFiles(account, bucket, prefix, localPaths)
+      const account = getAccountOrThrow(assertString(accountId, 'accountId'))
+      return s3.uploadLocalFiles(
+        account,
+        assertString(bucket, 'bucket'),
+        typeof prefix === 'string' ? prefix : '',
+        assertStringArray(localPaths, 'localPaths')
+      )
     }
   )
 
   ipcMain.handle(
     's3:getObjectPreview',
     async (_, accountId: string, bucket: string, key: string) => {
-      const account = getAccountOrThrow(accountId)
-      return s3.getObjectPreview(account, bucket, key)
+      const account = getAccountOrThrow(assertString(accountId, 'accountId'))
+      return s3.getObjectPreview(account, assertString(bucket, 'bucket'), assertString(key, 'key'))
+    }
+  )
+
+  ipcMain.handle(
+    's3:putObjectText',
+    async (
+      _,
+      accountId: string,
+      bucket: string,
+      key: string,
+      text: string,
+      contentType: string
+    ) => {
+      const account = getAccountOrThrow(assertString(accountId, 'accountId'))
+      return s3.putObjectText(
+        account,
+        assertString(bucket, 'bucket'),
+        assertString(key, 'key'),
+        typeof text === 'string' ? text : '',
+        assertString(contentType, 'contentType')
+      )
     }
   )
 
@@ -195,6 +354,11 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
+    void s3.cleanupPreviewCache()
     app.quit()
   }
+})
+
+app.on('before-quit', () => {
+  void s3.cleanupPreviewCache()
 })

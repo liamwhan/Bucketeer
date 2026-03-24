@@ -3,14 +3,13 @@ import type {
   DownloadResult,
   ListObjectsRow,
   ObjectPreviewResult,
+  SaveObjectResult,
   UploadResult
 } from './types.js'
 
 export type S3BucketSummary = { Name?: string; CreationDate?: string }
 
 export interface BucketeerApi {
-  /** Generic IPC; optional for older preload builds until the app is restarted. */
-  invoke?: (channel: string, ...args: unknown[]) => Promise<unknown>
   /** Absolute path for a dropped OS file (Electron webUtils). */
   pathFromFile: (file: File) => string
   accounts: {
@@ -57,5 +56,12 @@ export interface BucketeerApi {
       bucket: string,
       key: string
     ) => Promise<ObjectPreviewResult>
+    putObjectText: (
+      accountId: string,
+      bucket: string,
+      key: string,
+      text: string,
+      contentType: string
+    ) => Promise<SaveObjectResult>
   }
 }
