@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Verify package version matches tag
+        shell: bash
+        run: |
+          PKG_VER=$(node -p "require('./package.json').version")
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VER" != "$TAG_VER" ]; then
+            echo "::error::package.json version is $PKG_VER but tag is $GITHUB_REF_NAME (expected v$PKG_VER)"
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - name: Build and package
+        run: npm run build && npm run icons && npx electron-builder --publish never
+
+      - name: Collect installers for artifact
+        shell: bash
+        run: |
+          mkdir -p upload
+          shopt -s nullglob
+          for f in release/*.exe release/*.dmg release/*.AppImage release/*.blockmap; do
+            if [ -f "$f" ]; then cp "$f" upload/; fi
+          done
+          ls -la upload/
+          test "$(find upload -type f | wc -l)" -ge 1
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: upload/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: |
+            Installers for **${{ github.ref_name }}**.
+
+            - **Windows:** run the NSIS `.exe` installer.
+            - **macOS:** open the `.dmg` and drag the app to Applications. Unsigned builds may require right-click → Open the first time.
+            - **Linux:** `chmod +x` the `.AppImage` if needed, then run it.
+          files: release-assets/*

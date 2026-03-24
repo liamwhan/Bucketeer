@@ -88,7 +88,7 @@ npm run build
 npm run preview
 ```
 
-> **Note:** This repository currently focuses on **dev and `electron-vite` build output**. If you want installers (`.msi`, `.dmg`, `.AppImage`), wire up **electron-builder** or your preferred packager—the app entry is `out/main/index.js` after `npm run build`.
+Installers (NSIS `.exe`, `.dmg`, `.AppImage`) are produced with **`npm run dist`** (or the same steps the **Release** GitHub Action runs: `npm run build`, `npm run icons`, `electron-builder`). Pushing a tag **`v*`** whose suffix matches **`package.json`** `version` builds all platforms and publishes a GitHub Release. The packaged app entry remains `out/main/index.js` after `npm run build`.
 
 ---
 
