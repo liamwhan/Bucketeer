@@ -343,6 +343,21 @@ app.whenReady().then(() => {
     }
   )
 
+  ipcMain.handle(
+    's3:putObjectText',
+    async (
+      _,
+      accountId: string,
+      bucket: string,
+      key: string,
+      text: string,
+      contentType: string
+    ) => {
+      const account = getAccountOrThrow(accountId)
+      return s3.putObjectText(account, bucket, key, text, contentType)
+    }
+  )
+
   createWindow()
 
   app.on('activate', () => {
