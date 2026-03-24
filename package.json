@@ -1,6 +1,6 @@
 {
   "name": "bucketeer",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Free open source multi-account Amazon S3 desktop browser",
   "author": "Liam Whan",
   "license": "MIT",
@@ -10,7 +10,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "icons": "node -e \"console.log('icons: skip (electron-builder defaults)')\"",
+    "icons": "node scripts/generate-icons.mjs",
     "dist": "npm run build && npm run icons && electron-builder --publish never"
   },
   "dependencies": {
@@ -31,6 +31,7 @@
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "typescript": "~5.6.2",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "png2icons": "^2.0.1"
   }
 }

@@ -1,6 +1,23 @@
 import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { existsSync } from 'fs'
 import { join } from 'path'
+
+function resolveWindowIcon(): string | undefined {
+  const ext =
+    process.platform === 'win32' ? 'ico' : process.platform === 'darwin' ? 'icns' : 'png'
+  const file = `icon.${ext}`
+  if (app.isPackaged) {
+    const packaged = join(process.resourcesPath, 'app-icons', file)
+    if (existsSync(packaged)) {
+      return packaged
+    }
+  }
+  const dev = join(app.getAppPath(), 'build', file)
+  if (existsSync(dev)) {
+    return dev
+  }
+  return undefined
+}
 import * as accountsStore from './accountsStore.js'
 import * as s3 from './s3Service.js'
 import type { AwsAccount, UploadResult } from '../shared/types.js'
@@ -16,6 +33,7 @@ function preloadScriptPath(): string {
 }
 
 function createWindow(): void {
+  const icon = resolveWindowIcon()
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -23,6 +41,7 @@ function createWindow(): void {
     minHeight: 600,
     show: false,
     title: 'Bucketeer',
+    ...(icon ? { icon } : {}),
     webPreferences: {
       preload: preloadScriptPath(),
       sandbox: false,

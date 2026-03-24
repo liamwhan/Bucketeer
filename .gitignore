@@ -1,4 +1,7 @@
 node_modules
+build/icon.ico
+build/icon.icns
+build/icon.png
 out
 dist
 release

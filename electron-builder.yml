@@ -11,14 +11,26 @@ files:
 
 win:
   target: nsis
+  icon: build/icon.ico
+  extraResources:
+    - from: build/icon.ico
+      to: app-icons/icon.ico
 
 mac:
   target: dmg
   category: public.app-category.developer-tools
   hardenedRuntime: false
+  icon: build/icon.icns
+  extraResources:
+    - from: build/icon.icns
+      to: app-icons/icon.icns
 
 linux:
   target: AppImage
   category: Development
+  icon: build/icon.png
+  extraResources:
+    - from: build/icon.png
+      to: app-icons/icon.png
 
 publish: null
