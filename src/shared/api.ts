@@ -11,6 +11,7 @@ export interface BucketeerApi {
   }
   s3: {
     listBuckets: (accountId: string) => Promise<S3BucketSummary[]>
+    createBucket: (accountId: string, bucketName: string) => Promise<void>
     listObjects: (
       accountId: string,
       bucket: string,

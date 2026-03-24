@@ -7,7 +7,9 @@ import {
   ListBucketsCommand,
   ListObjectsV2Command,
   GetObjectCommand,
-  type Bucket
+  CreateBucketCommand,
+  type Bucket,
+  type BucketLocationConstraint
 } from '@aws-sdk/client-s3'
 import type { AwsAccount, ListObjectsRow, DownloadResult } from '../shared/types.js'
 
@@ -45,6 +47,28 @@ export async function listBucketsForAccount(account: AwsAccount): Promise<Bucket
   const client = clientFor(account)
   const out = await client.send(new ListBucketsCommand({}))
   return out.Buckets ?? []
+}
+
+/** CreateBucket: us-east-1 must omit LocationConstraint; all other regions require it. */
+export async function createBucket(account: AwsAccount, bucketName: string): Promise<void> {
+  const region = account.region.trim()
+  const name = bucketName.trim()
+  if (!name) {
+    throw new Error('Bucket name is required')
+  }
+  const client = clientFor(account)
+  if (region === 'us-east-1') {
+    await client.send(new CreateBucketCommand({ Bucket: name }))
+    return
+  }
+  await client.send(
+    new CreateBucketCommand({
+      Bucket: name,
+      CreateBucketConfiguration: {
+        LocationConstraint: region as BucketLocationConstraint
+      }
+    })
+  )
 }
 
 function stripTrailingSlash(p: string): string {

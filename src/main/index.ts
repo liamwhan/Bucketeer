@@ -81,6 +81,11 @@ app.whenReady().then(() => {
     return s3.listBucketsForAccount(account)
   })
 
+  ipcMain.handle('s3:createBucket', async (_, accountId: string, bucketName: string) => {
+    const account = getAccountOrThrow(accountId)
+    await s3.createBucket(account, bucketName)
+  })
+
   ipcMain.handle(
     's3:listObjects',
     async (_, accountId: string, bucket: string, prefix: string) => {

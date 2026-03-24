@@ -68,6 +68,11 @@ export default function App(): JSX.Element {
   const [downloadBusy, setDownloadBusy] = useState(false)
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
 
+  const [createBucketAccountId, setCreateBucketAccountId] = useState<string | null>(null)
+  const [createBucketName, setCreateBucketName] = useState('')
+  const [createBucketBusy, setCreateBucketBusy] = useState(false)
+  const [createBucketError, setCreateBucketError] = useState<string | null>(null)
+
   const refreshAccounts = useCallback(async () => {
     const list = await window.bucketeer.accounts.list()
     setAccounts(list)
@@ -222,6 +227,34 @@ export default function App(): JSX.Element {
     await refreshAccounts()
   }
 
+  const createBucketTargetAccount = useMemo(
+    () => accounts.find((a) => a.id === createBucketAccountId) ?? null,
+    [accounts, createBucketAccountId]
+  )
+
+  const onCreateBucket = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const accountId = createBucketAccountId
+    if (!accountId) return
+    const name = createBucketName.trim()
+    if (!name) return
+    setCreateBucketBusy(true)
+    setCreateBucketError(null)
+    try {
+      await window.bucketeer.s3.createBucket(accountId, name)
+      setCreateBucketAccountId(null)
+      setCreateBucketName('')
+      await loadBuckets(accountId)
+      setSelection({ accountId, bucket: name })
+      setPrefix('')
+      setStatusMsg(`Created bucket “${name}”.`)
+    } catch (err) {
+      setCreateBucketError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCreateBucketBusy(false)
+    }
+  }
+
   const onDownload = async () => {
     if (!selection || selectedKeys.size === 0) return
     setDownloadBusy(true)
@@ -315,34 +348,57 @@ export default function App(): JSX.Element {
                   {isExp && err && (
                     <p className="ml-8 mr-2 text-xs text-red-400">{err}</p>
                   )}
-                  {isExp && !err && buckets && (
-                    <ul className="ml-4 border-l border-pane-border pl-2">
-                      {buckets.map((b) => {
-                        const name = b.Name ?? ''
-                        if (!name) return null
-                        const sel =
-                          selection?.accountId === acc.id && selection.bucket === name
-                        return (
-                          <li key={name}>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelection({ accountId: acc.id, bucket: name })
-                                setPrefix('')
-                              }}
-                              className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm ${
-                                sel
-                                  ? 'bg-sky-950/80 text-sky-100'
-                                  : 'text-slate-300 hover:bg-pane-hover'
-                              }`}
-                            >
-                              <Box className="h-4 w-4 shrink-0 text-sky-500/90" />
-                              <span className="truncate">{name}</span>
-                            </button>
-                          </li>
-                        )
-                      })}
-                    </ul>
+                  {isExp && !err && (
+                    <div className="ml-4 space-y-1 border-l border-pane-border pl-2">
+                      <button
+                        type="button"
+                        disabled={loading}
+                        onClick={() => {
+                          setCreateBucketAccountId(acc.id)
+                          setCreateBucketName('')
+                          setCreateBucketError(null)
+                        }}
+                        className="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs font-medium text-sky-400 hover:bg-pane-hover disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Plus className="h-3.5 w-3.5 shrink-0" />
+                        New bucket
+                      </button>
+                      {loading && !buckets && (
+                        <p className="px-2 py-1 text-xs text-slate-500">Loading buckets…</p>
+                      )}
+                      {buckets && buckets.length === 0 && !loading && (
+                        <p className="px-2 py-1 text-xs text-slate-500">No buckets yet.</p>
+                      )}
+                      {buckets && buckets.length > 0 && (
+                        <ul className="space-y-0.5">
+                          {buckets.map((b) => {
+                            const name = b.Name ?? ''
+                            if (!name) return null
+                            const sel =
+                              selection?.accountId === acc.id && selection.bucket === name
+                            return (
+                              <li key={name}>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelection({ accountId: acc.id, bucket: name })
+                                    setPrefix('')
+                                  }}
+                                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm ${
+                                    sel
+                                      ? 'bg-sky-950/80 text-sky-100'
+                                      : 'text-slate-300 hover:bg-pane-hover'
+                                  }`}
+                                >
+                                  <Box className="h-4 w-4 shrink-0 text-sky-500/90" />
+                                  <span className="truncate">{name}</span>
+                                </button>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      )}
+                    </div>
                   )}
                 </li>
               )
@@ -522,6 +578,79 @@ export default function App(): JSX.Element {
           )}
         </main>
       </div>
+
+      {createBucketAccountId && createBucketTargetAccount && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-bucket-title"
+            className="w-full max-w-md rounded-lg border border-pane-border bg-[#121a24] p-5 shadow-xl"
+          >
+            <h2 id="create-bucket-title" className="text-lg font-semibold text-white">
+              New bucket
+            </h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Account: <span className="text-slate-300">{createBucketTargetAccount.label}</span>
+              {' · '}
+              Region:{' '}
+              <span className="font-mono text-slate-300">{createBucketTargetAccount.region}</span>
+            </p>
+            <p className="mt-2 text-xs text-slate-500">
+              Name must be globally unique and follow{' '}
+              <a
+                className="text-sky-400 hover:underline"
+                href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html"
+                target="_blank"
+                rel="noreferrer"
+              >
+                S3 bucket naming rules
+              </a>
+              .
+            </p>
+            <form onSubmit={(e) => void onCreateBucket(e)} className="mt-4 space-y-3">
+              {createBucketError && (
+                <p className="rounded border border-red-900/50 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                  {createBucketError}
+                </p>
+              )}
+              <label className="block text-sm">
+                <span className="text-slate-400">Bucket name</span>
+                <input
+                  required
+                  autoFocus
+                  autoComplete="off"
+                  value={createBucketName}
+                  onChange={(e) => setCreateBucketName(e.target.value)}
+                  className="mt-1 w-full rounded border border-pane-border bg-[#0c1016] px-3 py-2 font-mono text-sm text-white outline-none focus:border-sky-600"
+                  placeholder="my-unique-bucket-name"
+                />
+              </label>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreateBucketAccountId(null)
+                    setCreateBucketName('')
+                    setCreateBucketError(null)
+                  }}
+                  className="rounded px-3 py-1.5 text-sm text-slate-300 hover:bg-pane-hover"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={createBucketBusy || !createBucketName.trim()}
+                  className="inline-flex items-center gap-2 rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+                >
+                  {createBucketBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                  Create
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {addOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">

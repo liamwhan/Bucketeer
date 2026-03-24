@@ -11,6 +11,8 @@ const api = {
   },
   s3: {
     listBuckets: (accountId: string) => ipcRenderer.invoke('s3:listBuckets', accountId),
+    createBucket: (accountId: string, bucketName: string) =>
+      ipcRenderer.invoke('s3:createBucket', accountId, bucketName),
     listObjects: (accountId: string, bucket: string, prefix: string) =>
       ipcRenderer.invoke('s3:listObjects', accountId, bucket, prefix),
     pickDownloadDir: (): Promise<string | null> => ipcRenderer.invoke('s3:pickDownloadDir'),
