@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AwsAccount, ListObjectsRow } from '@shared/types'
 import type { S3BucketSummary } from '@shared/api'
 import {
@@ -73,6 +73,10 @@ export default function App(): JSX.Element {
   const [createBucketBusy, setCreateBucketBusy] = useState(false)
   const [createBucketError, setCreateBucketError] = useState<string | null>(null)
 
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null)
+  const [editingLabelDraft, setEditingLabelDraft] = useState('')
+  const accountLabelInputRef = useRef<HTMLInputElement>(null)
+
   const refreshAccounts = useCallback(async () => {
     const list = await window.bucketeer.accounts.list()
     setAccounts(list)
@@ -81,6 +85,46 @@ export default function App(): JSX.Element {
   useEffect(() => {
     void refreshAccounts()
   }, [refreshAccounts])
+
+  useEffect(() => {
+    if (editingAccountId && accountLabelInputRef.current) {
+      const el = accountLabelInputRef.current
+      el.focus()
+      el.select()
+    }
+  }, [editingAccountId])
+
+  const cancelRenameAccount = useCallback(() => {
+    setEditingAccountId(null)
+    setEditingLabelDraft('')
+  }, [])
+
+  const commitRenameAccount = useCallback(async () => {
+    if (!editingAccountId) return
+    const acc = accounts.find((a) => a.id === editingAccountId)
+    if (!acc) {
+      cancelRenameAccount()
+      return
+    }
+    const label = editingLabelDraft.trim() || 'AWS account'
+    if (label === acc.label) {
+      cancelRenameAccount()
+      return
+    }
+    try {
+      await window.bucketeer.accounts.update({ ...acc, label })
+      await refreshAccounts()
+      cancelRenameAccount()
+    } catch (err) {
+      setStatusMsg(err instanceof Error ? err.message : String(err))
+    }
+  }, [
+    accounts,
+    cancelRenameAccount,
+    editingAccountId,
+    editingLabelDraft,
+    refreshAccounts
+  ])
 
   const loadBuckets = useCallback(async (accountId: string) => {
     setBucketsLoading((s) => new Set(s).add(accountId))
@@ -210,6 +254,9 @@ export default function App(): JSX.Element {
 
   const onRemoveAccount = async (id: string) => {
     if (!confirm('Remove this account from Bucketeer? Stored keys will be deleted.')) return
+    if (editingAccountId === id) {
+      cancelRenameAccount()
+    }
     await window.bucketeer.accounts.remove(id)
     setBucketsMap((m) => {
       const n = { ...m }
@@ -323,19 +370,54 @@ export default function App(): JSX.Element {
               const err = bucketsError[acc.id]
               return (
                 <li key={acc.id}>
-                  <div className="group flex items-center gap-1 rounded px-1">
+                  <div className="group flex items-center gap-0.5 rounded px-1">
                     <button
                       type="button"
+                      title={isExp ? 'Collapse buckets' : 'Expand buckets'}
                       onClick={() => toggleAccountExpanded(acc.id)}
-                      className="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-pane-hover"
+                      className="shrink-0 rounded p-1.5 text-slate-500 hover:bg-pane-hover hover:text-slate-300"
                     >
                       <ChevronRight
-                        className={`h-4 w-4 shrink-0 text-slate-500 transition-transform ${isExp ? 'rotate-90' : ''}`}
+                        className={`h-4 w-4 transition-transform ${isExp ? 'rotate-90' : ''}`}
                       />
-                      <HardDrive className="h-4 w-4 shrink-0 text-amber-500/90" />
-                      <span className="truncate font-medium text-slate-200">{acc.label}</span>
-                      {loading && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-slate-500" />}
                     </button>
+                    <div className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-1 hover:bg-pane-hover/60">
+                      <HardDrive className="h-4 w-4 shrink-0 text-amber-500/90" />
+                      {editingAccountId === acc.id ? (
+                        <input
+                          ref={accountLabelInputRef}
+                          value={editingLabelDraft}
+                          onChange={(e) => setEditingLabelDraft(e.target.value)}
+                          onBlur={() => void commitRenameAccount()}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault()
+                              void commitRenameAccount()
+                            }
+                            if (e.key === 'Escape') {
+                              e.preventDefault()
+                              cancelRenameAccount()
+                            }
+                          }}
+                          className="min-w-0 flex-1 rounded border border-sky-700/60 bg-[#0c1016] px-1.5 py-0.5 text-sm font-medium text-white outline-none focus:border-sky-500"
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        <span
+                          title="Double-click to rename"
+                          className="min-w-0 flex-1 cursor-text truncate select-text text-left text-sm font-medium text-slate-200"
+                          onDoubleClick={() => {
+                            setEditingAccountId(acc.id)
+                            setEditingLabelDraft(acc.label)
+                          }}
+                        >
+                          {acc.label}
+                        </span>
+                      )}
+                      {loading && editingAccountId !== acc.id && (
+                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-slate-500" />
+                      )}
+                    </div>
                     <button
                       type="button"
                       title="Remove account"
