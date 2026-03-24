@@ -1,6 +1,6 @@
 {
   "name": "bucketeer",
-  "version": "0.7.0",
+  "version": "1.0.0",
   "description": "Free open source multi-account Amazon S3 desktop browser",
   "author": "Liam Whan",
   "license": "MIT",

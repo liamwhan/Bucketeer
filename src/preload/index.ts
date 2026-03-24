@@ -31,7 +31,14 @@ const api = {
       localPaths: string[]
     ) => ipcRenderer.invoke('s3:uploadLocalFiles', accountId, bucket, prefix, localPaths),
     getObjectPreview: (accountId: string, bucket: string, key: string) =>
-      ipcRenderer.invoke('s3:getObjectPreview', accountId, bucket, key)
+      ipcRenderer.invoke('s3:getObjectPreview', accountId, bucket, key),
+    putObjectText: (
+      accountId: string,
+      bucket: string,
+      key: string,
+      text: string,
+      contentType: string
+    ) => ipcRenderer.invoke('s3:putObjectText', accountId, bucket, key, text, contentType)
   }
 }
 

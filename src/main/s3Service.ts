@@ -408,6 +408,9 @@ export async function getObjectPreview(
   const wasTruncated = Number.isFinite(totalBytes)
     ? totalBytes > PREVIEW_MAX_BYTES
     : raw.length >= PREVIEW_MAX_BYTES
+  if (wasTruncated) {
+    throw new Error(`Preview is limited to ${Math.round(PREVIEW_MAX_BYTES / 1024)} KB.`)
+  }
 
   if (contentType.includes('application/json')) {
     try {
@@ -438,4 +441,24 @@ export async function getObjectPreview(
     text,
     wasTruncated
   }
+}
+
+export async function putObjectText(
+  account: AwsAccount,
+  bucket: string,
+  key: string,
+  text: string,
+  contentType: string
+): Promise<{ key: string; eTag: string | undefined }> {
+  const client = await clientForBucket(account, bucket)
+  const body = Buffer.from(text, 'utf8')
+  const out = await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: body,
+      ContentType: contentType
+    })
+  )
+  return { key, eTag: out.ETag }
 }

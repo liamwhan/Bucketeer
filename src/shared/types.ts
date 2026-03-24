@@ -32,3 +32,8 @@ export type ObjectPreviewResult = {
   text: string
   wasTruncated: boolean
 }
+
+export type SaveObjectResult = {
+  key: string
+  eTag: string | undefined
+}

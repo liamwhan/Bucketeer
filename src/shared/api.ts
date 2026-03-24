@@ -3,6 +3,7 @@ import type {
   DownloadResult,
   ListObjectsRow,
   ObjectPreviewResult,
+  SaveObjectResult,
   UploadResult
 } from './types.js'
 
@@ -57,5 +58,12 @@ export interface BucketeerApi {
       bucket: string,
       key: string
     ) => Promise<ObjectPreviewResult>
+    putObjectText: (
+      accountId: string,
+      bucket: string,
+      key: string,
+      text: string,
+      contentType: string
+    ) => Promise<SaveObjectResult>
   }
 }
