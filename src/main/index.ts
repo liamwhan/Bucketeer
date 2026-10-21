@@ -1,4 +1,5 @@
-import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, Menu } from 'electron'
+import type { MenuItemConstructorOptions } from 'electron'
 import { existsSync } from 'fs'
 import { stat } from 'fs/promises'
 import { join } from 'path'
@@ -26,6 +27,7 @@ function resolveWindowIcon(): string | undefined {
 }
 import * as accountsStore from './accountsStore.js'
 import * as s3 from './s3Service.js'
+import * as updater from './updateService.js'
 import type { AwsAccount, UploadResult } from '../shared/types.js'
 
 const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['https:', 'mailto:'])
@@ -91,6 +93,54 @@ function preloadScriptPath(): string {
     if (existsSync(p)) return p
   }
   return join(dir, 'index.mjs')
+}
+
+function sendMenuAction(action: 'about' | 'checkForUpdates'): void {
+  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+  win?.webContents.send('menu:action', action)
+}
+
+function buildAppMenu(): void {
+  const isMac = process.platform === 'darwin'
+  const aboutItem: MenuItemConstructorOptions = {
+    label: 'About Bucketeer',
+    click: () => sendMenuAction('about')
+  }
+  const template: MenuItemConstructorOptions[] = [
+    ...(isMac
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              aboutItem,
+              { type: 'separator' },
+              { role: 'services' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' }
+            ]
+          } as MenuItemConstructorOptions
+        ]
+      : []),
+    { role: 'fileMenu' },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+    {
+      role: 'help',
+      submenu: [
+        {
+          label: 'Check for Updates…',
+          click: () => sendMenuAction('checkForUpdates')
+        },
+        ...(isMac ? [] : [{ type: 'separator' } as MenuItemConstructorOptions, aboutItem])
+      ]
+    }
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
 function createWindow(): void {
@@ -186,6 +236,16 @@ app.whenReady().then(() => {
   if (process.platform === 'win32') {
     app.setAppUserModelId('com.bucketeer.app')
   }
+
+  buildAppMenu()
+
+  ipcMain.handle('app:getVersion', () => app.getVersion())
+  ipcMain.handle('app:checkForUpdates', () => updater.checkForUpdates())
+  ipcMain.handle('app:openReleasePage', (_, url: string) => {
+    if (typeof url === 'string' && url.startsWith(updater.RELEASES_URL_PREFIX)) {
+      return shell.openExternal(url)
+    }
+  })
 
   ipcMain.handle('accounts:list', () => accountsStore.listAccounts())
 

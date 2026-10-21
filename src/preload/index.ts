@@ -1,7 +1,18 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { AwsAccount } from '../shared/types.js'
+import type { MenuAction } from '../shared/api.js'
 
 const api = {
+  app: {
+    getVersion: (): Promise<string> => ipcRenderer.invoke('app:getVersion'),
+    checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
+    openReleasePage: (url: string): Promise<void> => ipcRenderer.invoke('app:openReleasePage', url),
+    onMenuAction: (callback: (action: MenuAction) => void): (() => void) => {
+      const listener = (_: unknown, action: MenuAction): void => callback(action)
+      ipcRenderer.on('menu:action', listener)
+      return () => ipcRenderer.removeListener('menu:action', listener)
+    }
+  },
   pathFromFile: (file: File) => webUtils.getPathForFile(file),
   accounts: {
     list: (): Promise<AwsAccount[]> => ipcRenderer.invoke('accounts:list'),

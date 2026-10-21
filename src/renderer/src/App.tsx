@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AwsAccount, ListObjectsRow } from '@shared/types'
-import type { S3BucketSummary } from '@shared/api'
+import type { S3BucketSummary, UpdateCheckResult } from '@shared/api'
 import {
   Cloud,
   Download,
@@ -297,6 +297,25 @@ export default function App(): JSX.Element {
     | { status: 'error'; message: string }
   >({ status: 'idle' })
   const [previewEditMode, setPreviewEditMode] = useState(false)
+  const [appVersion, setAppVersion] = useState('')
+  const [availableUpdate, setAvailableUpdate] = useState<UpdateCheckResult | null>(null)
+  const [aboutOpen, setAboutOpen] = useState(false)
+  const [updateCheck, setUpdateCheck] = useState<
+    { status: 'idle' | 'checking' | 'upToDate' } | { status: 'error'; message: string }
+  >({ status: 'idle' })
+  const runUpdateCheck = useCallback(async () => {
+    setUpdateCheck({ status: 'checking' })
+    try {
+      const r = await window.bucketeer.app.checkForUpdates()
+      if (r.updateAvailable) setAvailableUpdate(r)
+      setUpdateCheck({ status: r.updateAvailable ? 'idle' : 'upToDate' })
+    } catch (err) {
+      setUpdateCheck({
+        status: 'error',
+        message: err instanceof Error ? err.message : String(err)
+      })
+    }
+  }, [])
   // Native confirm() leaves Electron's renderer without text focus on Windows, so use an in-app dialog.
   const [confirmDialog, setConfirmDialog] = useState<{ message: string } | null>(null)
   const confirmResolverRef = useRef<((ok: boolean) => void) | null>(null)
@@ -319,6 +338,16 @@ export default function App(): JSX.Element {
     const list = await window.bucketeer.accounts.list()
     setAccounts(list)
   }, [])
+
+  useEffect(() => {
+    void window.bucketeer.app.getVersion().then(setAppVersion)
+    // Startup check is best-effort: failures only surface when the user checks manually.
+    void runUpdateCheck().then(() => setUpdateCheck({ status: 'idle' }))
+    return window.bucketeer.app.onMenuAction((action) => {
+      setAboutOpen(true)
+      if (action === 'checkForUpdates') void runUpdateCheck()
+    })
+  }, [runUpdateCheck])
 
   useEffect(() => {
     void refreshAccounts()
@@ -905,10 +934,32 @@ export default function App(): JSX.Element {
           <Cloud className="h-7 w-7 text-sky-400" aria-hidden />
           <div>
             <h1 className="text-lg font-semibold tracking-tight text-white">Bucketeer</h1>
-            <p className="text-xs text-slate-500">Multi-account S3 browser</p>
+            <p className="text-xs text-slate-500">
+              Multi-account S3 browser{appVersion ? ` · v${appVersion}` : ''}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {availableUpdate && (
+            <div className="flex items-center gap-2 rounded-md border border-emerald-700/60 bg-emerald-950/40 px-2.5 py-1 text-xs text-emerald-200">
+              <span>Update available: v{availableUpdate.latestVersion}</span>
+              <button
+                type="button"
+                onClick={() => void window.bucketeer.app.openReleasePage(availableUpdate.releaseUrl)}
+                className="font-medium text-emerald-300 underline hover:text-emerald-100"
+              >
+                Download
+              </button>
+              <button
+                type="button"
+                onClick={() => setAvailableUpdate(null)}
+                aria-label="Dismiss update notice"
+                className="text-emerald-400 hover:text-white"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => setAddOpen(true)}
@@ -1416,6 +1467,77 @@ export default function App(): JSX.Element {
           )}
         </main>
       </div>
+
+      {aboutOpen && (
+        <div
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50"
+          onClick={() => setAboutOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-label="About Bucketeer"
+            className="w-80 rounded-md border border-pane-border bg-[#1a2332] p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center gap-2">
+              <Cloud className="h-8 w-8 text-sky-400" aria-hidden />
+              <div>
+                <h2 className="text-base font-semibold text-white">Bucketeer</h2>
+                <p className="text-xs text-slate-400">Version {appVersion || '…'}</p>
+              </div>
+            </div>
+            <p className="mb-3 text-xs text-slate-400">
+              Free open source multi-account Amazon S3 desktop browser.
+            </p>
+            <div className="mb-4 min-h-[1.25rem] text-xs">
+              {updateCheck.status === 'checking' && (
+                <span className="inline-flex items-center gap-1.5 text-slate-400">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Checking for updates...
+                </span>
+              )}
+              {updateCheck.status === 'upToDate' && (
+                <span className="text-emerald-300">You are up to date.</span>
+              )}
+              {updateCheck.status === 'error' && (
+                <span className="text-red-300">{updateCheck.message}</span>
+              )}
+              {availableUpdate && updateCheck.status !== 'checking' && (
+                <span className="text-emerald-200">
+                  Update available: v{availableUpdate.latestVersion}{' '}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void window.bucketeer.app.openReleasePage(availableUpdate.releaseUrl)
+                    }
+                    className="font-medium text-emerald-300 underline hover:text-emerald-100"
+                  >
+                    Download
+                  </button>
+                </span>
+              )}
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => void runUpdateCheck()}
+                disabled={updateCheck.status === 'checking'}
+                className="rounded border border-pane-border px-3 py-1 text-xs text-slate-200 hover:bg-pane-hover disabled:opacity-50"
+              >
+                Check for updates
+              </button>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => setAboutOpen(false)}
+                className="rounded bg-sky-600 px-3 py-1 text-xs font-medium text-white hover:bg-sky-500"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {confirmDialog && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50">

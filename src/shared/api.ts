@@ -9,7 +9,23 @@ import type {
 
 export type S3BucketSummary = { Name?: string; CreationDate?: string }
 
+export type UpdateCheckResult = {
+  currentVersion: string
+  latestVersion: string
+  updateAvailable: boolean
+  releaseUrl: string
+}
+
+export type MenuAction = 'about' | 'checkForUpdates'
+
 export interface BucketeerApi {
+  app: {
+    getVersion: () => Promise<string>
+    checkForUpdates: () => Promise<UpdateCheckResult>
+    openReleasePage: (url: string) => Promise<void>
+    /** Subscribes to native menu actions; returns an unsubscribe function. */
+    onMenuAction: (callback: (action: MenuAction) => void) => () => void
+  }
   /** Absolute path for a dropped OS file (Electron webUtils). */
   pathFromFile: (file: File) => string
   accounts: {
