@@ -69,3 +69,8 @@ body {
 .json-preview .tok-punctuation {
   color: #94a3b8;
 }
+
+.json-edit-mirror::-webkit-scrollbar-thumb,
+.json-edit-mirror::-webkit-scrollbar-track {
+  background: transparent;
+}

@@ -139,13 +139,15 @@ type JsonTokenType = 'key' | 'string' | 'number' | 'boolean' | 'null' | 'punctua
 type JsonToken = { type: JsonTokenType; value: string }
 
 function tokenizeJsonForPreview(raw: string): JsonToken[] {
-  let text = raw
   try {
-    text = JSON.stringify(JSON.parse(raw), null, 2)
+    return tokenizeJsonText(JSON.stringify(JSON.parse(raw), null, 2))
   } catch {
     return [{ type: 'plain', value: raw }]
   }
+}
 
+// Lenient tokenizer that preserves text exactly, so it also works on invalid in-progress edits.
+function tokenizeJsonText(text: string): JsonToken[] {
   const tokens: JsonToken[] = []
   let i = 0
 
@@ -295,6 +297,20 @@ export default function App(): JSX.Element {
     | { status: 'error'; message: string }
   >({ status: 'idle' })
   const [previewEditMode, setPreviewEditMode] = useState(false)
+  // Native confirm() leaves Electron's renderer without text focus on Windows, so use an in-app dialog.
+  const [confirmDialog, setConfirmDialog] = useState<{ message: string } | null>(null)
+  const confirmResolverRef = useRef<((ok: boolean) => void) | null>(null)
+  const askConfirm = useCallback((message: string) => {
+    return new Promise<boolean>((resolve) => {
+      confirmResolverRef.current = resolve
+      setConfirmDialog({ message })
+    })
+  }, [])
+  const resolveConfirm = useCallback((ok: boolean) => {
+    confirmResolverRef.current?.(ok)
+    confirmResolverRef.current = null
+    setConfirmDialog(null)
+  }, [])
   const [previewDraft, setPreviewDraft] = useState('')
   const [previewSaveBusy, setPreviewSaveBusy] = useState(false)
   const [previewActionError, setPreviewActionError] = useState<string | null>(null)
@@ -519,7 +535,7 @@ export default function App(): JSX.Element {
   }
 
   const onRemoveAccount = async (id: string) => {
-    if (!confirm('Remove this account from Bucketeer? Stored keys will be deleted.')) return
+    if (!(await askConfirm('Remove this account from Bucketeer? Stored keys will be deleted.'))) return
     if (editingAccountId === id) {
       cancelRenameAccount()
     }
@@ -736,13 +752,13 @@ export default function App(): JSX.Element {
 
   const previewDirty = previewState.status === 'ready' && previewEditMode && previewDraft !== previewState.text
 
-  const confirmDiscardPreviewChanges = useCallback(() => {
+  const confirmDiscardPreviewChanges = useCallback(async () => {
     if (!previewDirty) return true
-    return confirm('Discard unsaved preview edits?')
-  }, [previewDirty])
+    return askConfirm('Discard unsaved preview edits?')
+  }, [previewDirty, askConfirm])
 
-  const closePreviewPane = useCallback(() => {
-    if (!confirmDiscardPreviewChanges()) return
+  const closePreviewPane = useCallback(async () => {
+    if (!(await confirmDiscardPreviewChanges())) return
     setPreviewKey(null)
     setPreviewState({ status: 'idle' })
     setPreviewEditMode(false)
@@ -758,8 +774,8 @@ export default function App(): JSX.Element {
     setPreviewActionError(null)
   }, [previewState])
 
-  const onCancelPreviewEdit = useCallback(() => {
-    if (!confirmDiscardPreviewChanges()) return
+  const onCancelPreviewEdit = useCallback(async () => {
+    if (!(await confirmDiscardPreviewChanges())) return
     if (previewState.status === 'ready') {
       setPreviewDraft(previewState.text)
     } else {
@@ -781,7 +797,7 @@ export default function App(): JSX.Element {
       setPreviewActionError(validation.message)
       return
     }
-    const ok = confirm(`Write ${strategy.label} changes back to S3 for "${previewState.key}"?`)
+    const ok = await askConfirm(`Write ${strategy.label} changes back to S3 for "${previewState.key}"?`)
     if (!ok) return
     setPreviewSaveBusy(true)
     setPreviewActionError(null)
@@ -806,7 +822,7 @@ export default function App(): JSX.Element {
     } finally {
       setPreviewSaveBusy(false)
     }
-  }, [loadObjects, prefix, previewDraft, previewState, selection])
+  }, [askConfirm, loadObjects, prefix, previewDraft, previewState, selection])
 
   const onCreateFolderSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -868,6 +884,12 @@ export default function App(): JSX.Element {
     if (!strategy) return [{ type: 'plain', value: previewState.text }]
     return strategy.previewRenderer(previewState.text)
   }, [previewState])
+
+  const previewDraftTokens = useMemo(
+    () => (previewEditMode ? tokenizeJsonText(previewDraft) : null),
+    [previewEditMode, previewDraft]
+  )
+  const editHighlightRef = useRef<HTMLPreElement>(null)
 
   const previewPdfDataUrl = useMemo(() => {
     if (previewState.status !== 'ready') return null
@@ -1234,8 +1256,10 @@ export default function App(): JSX.Element {
                             <button
                               type="button"
                               onClick={() => {
-                                if (!confirmDiscardPreviewChanges()) return
-                                void onOpenPreview(row)
+                                void (async () => {
+                                  if (!(await confirmDiscardPreviewChanges())) return
+                                  void onOpenPreview(row)
+                                })()
                               }}
                               className={`inline-flex items-center gap-2 text-left ${
                                 previewActive
@@ -1269,7 +1293,7 @@ export default function App(): JSX.Element {
                       </div>
                       <button
                         type="button"
-                        onClick={closePreviewPane}
+                        onClick={() => void closePreviewPane()}
                         className="rounded p-1 text-slate-400 hover:bg-pane-hover hover:text-slate-200"
                         aria-label="Close preview"
                       >
@@ -1315,7 +1339,7 @@ export default function App(): JSX.Element {
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={onCancelPreviewEdit}
+                                  onClick={() => void onCancelPreviewEdit()}
                                   disabled={previewSaveBusy}
                                   className="rounded border border-pane-border px-2 py-1 text-xs text-slate-200 hover:bg-pane-hover disabled:opacity-50"
                                 >
@@ -1352,12 +1376,32 @@ export default function App(): JSX.Element {
                               </pre>
                             ))}
                           {previewEditMode && (
-                            <textarea
-                              value={previewDraft}
-                              onChange={(e) => setPreviewDraft(e.target.value)}
-                              spellCheck={false}
-                              className="h-[65vh] w-full resize-y rounded border border-pane-border bg-[#0b111b] p-3 font-mono text-xs leading-relaxed text-slate-200 outline-none focus:border-sky-600"
-                            />
+                            <div className="relative h-[65vh] w-full rounded border border-pane-border bg-[#0b111b] focus-within:border-sky-600">
+                              <pre
+                                ref={editHighlightRef}
+                                aria-hidden
+                                className="json-preview json-edit-mirror pointer-events-none absolute inset-0 m-0 overflow-x-hidden overflow-y-scroll whitespace-pre-wrap break-words p-3 font-mono text-xs leading-relaxed text-slate-200"
+                              >
+                                {(previewDraftTokens ?? []).map((token, idx) => (
+                                  <span key={`${idx}-${token.type}`} className={`tok-${token.type}`}>
+                                    {token.value}
+                                  </span>
+                                ))}
+                                {'\n'}
+                              </pre>
+                              <textarea
+                                value={previewDraft}
+                                onChange={(e) => setPreviewDraft(e.target.value)}
+                                onScroll={(e) => {
+                                  const pre = editHighlightRef.current
+                                  if (!pre) return
+                                  pre.scrollTop = e.currentTarget.scrollTop
+                                  pre.scrollLeft = e.currentTarget.scrollLeft
+                                }}
+                                spellCheck={false}
+                                className="absolute inset-0 h-full w-full resize-none overflow-x-hidden overflow-y-scroll whitespace-pre-wrap break-words bg-transparent p-3 font-mono text-xs leading-relaxed text-transparent caret-slate-100 outline-none selection:bg-sky-700/50"
+                              />
+                            </div>
                           )}
                           <p className="text-[11px] text-slate-600">
                             Cached temporarily at: {previewState.tempPath}
@@ -1372,6 +1416,34 @@ export default function App(): JSX.Element {
           )}
         </main>
       </div>
+
+      {confirmDialog && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50">
+          <div
+            role="alertdialog"
+            className="w-80 rounded-md border border-pane-border bg-[#1a2332] p-4 shadow-xl"
+          >
+            <p className="mb-4 text-sm text-slate-200">{confirmDialog.message}</p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => resolveConfirm(false)}
+                className="rounded border border-pane-border px-3 py-1 text-xs text-slate-200 hover:bg-pane-hover"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => resolveConfirm(true)}
+                className="rounded bg-emerald-700 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {objectContextMenu && (
         <div
