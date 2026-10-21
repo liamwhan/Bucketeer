@@ -12,7 +12,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", default-features = false, features = ["wry", "compression", "common-controls-v6", "x11"] }
-tauri-plugin-dialog = { version = "2", default-features = false }
+tauri-plugin-dialog = { version = "2", default-features = false, features = ["gtk3"] }  # gtk3 is the Linux file-dialog backend; rfd refuses to build without one
 tauri-plugin-opener = { version = "2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
