@@ -95,7 +95,7 @@ S3 calls are made with **cached S3 `Client` instances** per account/region/key t
 git clone https://github.com/liamwhan/Bucketeer.git
 cd Bucketeer
 npm install
-npm run dev
+npm run tauri dev
 ```
 
 The app opens in development mode with hot reload (Vite + `tauri dev`). Requires the [Rust toolchain](https://rustup.rs/) and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
