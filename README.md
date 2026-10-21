@@ -6,7 +6,7 @@
 
 **A fast, sleek, native-feeling desktop client for Amazon S3—built for people who live in buckets.**
 
-Stop juggling browser tabs, AWS Console quirks, and one-off scripts just to move files between accounts. Bucketeer is a **free, open-source Electron app** that puts **multiple AWS accounts**, **per-region credentials**, and **real filesystem workflows** (drag in, pick a folder out) in one place.
+Stop juggling browser tabs, AWS Console quirks, and one-off scripts just to move files between accounts. Bucketeer is a **free, open-source Tauri app** that puts **multiple AWS accounts**, **per-region credentials**, and **real filesystem workflows** (drag in, pick a folder out) in one place.
 
 <p align="center">
   <img src="Bucketeer_screenshot.png" alt="Bucketeer — multi-account S3 browser with sidebar, object list, and toolbar" width="920" />
@@ -29,8 +29,8 @@ Stop juggling browser tabs, AWS Console quirks, and one-off scripts just to move
 | **Inspect and edit JSON instantly** | Click a file name to open a lazy-loaded right-side preview pane, then edit JSON in-place and save back to S3 with validation. |
 | **Preview PDFs without leaving your flow** | Open PDF objects directly in the right-side preview pane so you can verify docs quickly without downloading and opening another app. |
 | **A UI that feels great all day** | Fast interactions, clean layout, and native-feeling desktop ergonomics designed for heavy bucket browsing sessions. |
-| **Credentials that stay on your machine** | Access keys are stored in Electron’s **user data** directory as local JSON—not sent to a third-party backend. |
-| **A codebase you can fork** | TypeScript end-to-end, **AWS SDK for JavaScript v3**, IPC through a typed preload bridge—no magic. |
+| **Credentials that stay on your machine** | Access keys are stored in the app’s **data** directory as local JSON—not sent to a third-party backend. |
+| **A codebase you can fork** | React + TypeScript UI, a small **Rust** backend on the **AWS SDK for Rust**, typed commands between them—no magic. |
 
 If you’ve ever thought *“I just need Cyberduck, but S3-native and hackable”*—you’re in the right repo.
 
@@ -56,11 +56,11 @@ If you’ve ever thought *“I just need Cyberduck, but S3-native and hackable�
 
 ## Architecture (for contributors)
 
-- **Electron main process** — Owns AWS clients (`@aws-sdk/client-s3`), file dialogs, streams for upload/download, and account persistence.
-- **Preload** — Exposes a minimal `window.bucketeer` API via `contextBridge`; **context isolation on**, **Node integration off** in the renderer.
-- **Renderer** — React 18 + TypeScript + Tailwind CSS + Lucide icons; talks only through the preload contract (`src/shared/api.ts` mirrors the surface).
+- **Tauri backend (Rust)** — Owns AWS clients (`aws-sdk-s3`), file dialogs, streams for upload/download, and account persistence (`src-tauri/src`).
+- **Bridge** — `src/renderer/src/bridge.ts` exposes a minimal `window.bucketeer` API over Tauri `invoke`; the webview gets no plugin permissions and a strict CSP.
+- **Renderer** — React 18 + TypeScript + Tailwind CSS + Lucide icons; talks only through the bridge contract (`src/shared/api.ts` mirrors the surface).
 
-S3 calls are made with **cached `S3Client` instances** per account/region/key tuple so repeated navigation stays snappy.
+S3 calls are made with **cached S3 `Client` instances** per account/region/key tuple so repeated navigation stays snappy.
 
 ### Preview safety model
 
@@ -74,7 +74,7 @@ S3 calls are made with **cached `S3Client` instances** per account/region/key tu
 
 ## Security & privacy
 
-- Credentials are stored in **`accounts.json`** under the app’s user data path (platform-specific; Electron `app.getPath('userData')`).
+- Credentials are stored in **`accounts.json`** under the app’s user data path (platform-specific app data dir, e.g. `%APPDATA%\com.github.liamwhan.bucketeer` on Windows; accounts from the old Electron build are imported on first launch).
 - There is **no** separate Bucketeer cloud service—traffic is between your machine and **AWS S3** only.
 - Use **least-privilege IAM** (e.g. scoped policies for specific buckets/prefixes) for everyday work; rotate keys if they’re ever exposed.
 
@@ -84,6 +84,7 @@ S3 calls are made with **cached `S3Client` instances** per account/region/key tu
 
 - **Node.js** 18+ (recommended: current LTS)
 - **npm** (ships with Node)
+- **Rust** (stable, via [rustup](https://rustup.rs/)) plus the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS
 - **AWS access key** with permissions for the S3 operations you need (and the correct **region** per account)
 
 ---
@@ -97,16 +98,15 @@ npm install
 npm run dev
 ```
 
-The app opens in development mode with hot reload via **electron-vite**.
+The app opens in development mode with hot reload (Vite + `tauri dev`). Requires the [Rust toolchain](https://rustup.rs/) and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
 
 ### Production build (from source)
 
 ```bash
-npm run build
-npm run preview
+npm run build   # type-check + bundle the UI into dist/
 ```
 
-Installers (NSIS `.exe`, `.dmg`, `.AppImage`) are produced with **`npm run dist`** (or the same steps the **Release** GitHub Action runs: `npm run build`, `npm run icons`, `electron-builder`). Pushing a tag **`v*`** whose suffix matches **`package.json`** `version` builds all platforms and publishes a GitHub Release. The packaged app entry remains `out/main/index.js` after `npm run build`.
+Installers (NSIS `.exe`, `.dmg`, `.AppImage`) are produced with **`npm run dist`** (`tauri build`; the **Release** GitHub Action runs `tauri build --bundles <nsis|dmg|appimage>` per OS). Pushing a tag **`v*`** whose suffix matches the `version` in both **`package.json`** and **`src-tauri/Cargo.toml`** builds all platforms and publishes a GitHub Release. Icons live in `src-tauri/icons` (regenerate from `Bucketeer.png` with `npm run icons`).
 
 ---
 
@@ -114,10 +114,12 @@ Installers (NSIS `.exe`, `.dmg`, `.AppImage`) are produced with **`npm run dist`
 
 ```
 src/
-  main/           # Electron main — IPC, S3 service, account store
-  preload/        # contextBridge API
-  renderer/src/   # React UI (App.tsx)
+  renderer/src/   # React UI (App.tsx) + bridge.ts (window.bucketeer over Tauri invoke)
   shared/         # Types + API shape shared across layers
+src-tauri/
+  src/            # Rust — commands, S3 service, account store, menu
+  icons/          # App/installer icons
+  tauri.conf.json # Window, CSP, bundle targets
 ```
 
 ---
@@ -135,19 +137,19 @@ These are intentional transparency, not excuses—they’re great **first PR** o
 
 | Layer        | Choice |
 |-------------|--------|
-| Desktop     | [Electron](https://www.electronjs.org/) |
-| Build       | [electron-vite](https://electron-vite.org/) + [Vite](https://vitejs.dev/) |
+| Desktop     | [Tauri](https://tauri.app/) 2 (Rust + system webview) |
+| Build       | [Vite](https://vitejs.dev/) + Cargo |
 | UI          | [React](https://react.dev/) 18 |
 | Styling     | [Tailwind CSS](https://tailwindcss.com/) |
 | Icons       | [Lucide](https://lucide.dev/) |
-| AWS         | [AWS SDK for JavaScript v3](https://docs.aws.amazon.com/sdk-for-javascript/v3/developer-guide/) — `@aws-sdk/client-s3` |
-| Language    | TypeScript |
+| AWS         | [AWS SDK for Rust](https://docs.aws.amazon.com/sdk-for-rust/) — `aws-sdk-s3` |
+| Language    | TypeScript (UI), Rust (backend) |
 
 ---
 
 ## Contributing
 
-Issues and PRs are welcome—whether that’s **packaging**, **S3-compatible endpoints**, or **UI polish**. Please keep changes focused and consistent with existing patterns (typed IPC, small main-process surface).
+Issues and PRs are welcome—whether that’s **packaging**, **S3-compatible endpoints**, or **UI polish**. Please keep changes focused and consistent with existing patterns (typed commands, small backend surface).
 
 ---
 
