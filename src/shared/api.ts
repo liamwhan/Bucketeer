@@ -26,8 +26,6 @@ export interface BucketeerApi {
     /** Subscribes to native menu actions; returns an unsubscribe function. */
     onMenuAction: (callback: (action: MenuAction) => void) => () => void
   }
-  /** Absolute path for a dropped OS file (Electron webUtils). */
-  pathFromFile: (file: File) => string
   accounts: {
     list: () => Promise<AwsAccount[]>
     add: (input: Omit<AwsAccount, 'id'>) => Promise<AwsAccount>

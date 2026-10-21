@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core event/window access for the main window. Dialogs, shell-opening and S3 are Rust commands, so no plugin permissions are granted to the webview.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

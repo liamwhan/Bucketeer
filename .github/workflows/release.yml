@@ -13,7 +13,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            bundles: nsis
+          - os: macos-latest
+            bundles: dmg
+          # Oldest supported runner keeps the AppImage compatible with older glibc.
+          - os: ubuntu-22.04
+            bundles: appimage
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -23,27 +30,47 @@ jobs:
           node-version: '20'
           cache: npm
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
       - name: Verify package version matches tag
         shell: bash
         run: |
           PKG_VER=$(node -p "require('./package.json').version")
+          CARGO_VER=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d '"' -f2)
           TAG_VER="${GITHUB_REF_NAME#v}"
           if [ "$PKG_VER" != "$TAG_VER" ]; then
             echo "::error::package.json version is $PKG_VER but tag is $GITHUB_REF_NAME (expected v$PKG_VER)"
+            exit 1
+          fi
+          if [ "$CARGO_VER" != "$TAG_VER" ]; then
+            echo "::error::src-tauri/Cargo.toml version is $CARGO_VER but tag is $GITHUB_REF_NAME"
             exit 1
           fi
 
       - run: npm ci
 
       - name: Build and package
-        run: npm run build && npm run icons && npx electron-builder --publish never
+        run: npx tauri build --bundles ${{ matrix.bundles }}
+        env:
+          # linuxdeploy's bundled strip can't read newer ELF sections on some runners.
+          NO_STRIP: 'true'
 
       - name: Collect installers for artifact
         shell: bash
         run: |
           mkdir -p upload
           shopt -s nullglob
-          for f in release/*.exe release/*.dmg release/*.AppImage release/*.blockmap; do
+          for f in src-tauri/target/release/bundle/nsis/*.exe                    src-tauri/target/release/bundle/dmg/*.dmg                    src-tauri/target/release/bundle/appimage/*.AppImage; do
             if [ -f "$f" ]; then cp "$f" upload/; fi
           done
           ls -la upload/
@@ -52,7 +79,7 @@ jobs:
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.os }}
+          name: dist-${{ matrix.bundles }}
           path: upload/*
           if-no-files-found: error
 

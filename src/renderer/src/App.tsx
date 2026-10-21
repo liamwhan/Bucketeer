@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import type { AwsAccount, ListObjectsRow } from '@shared/types'
 import type { S3BucketSummary, UpdateCheckResult } from '@shared/api'
 import {
@@ -316,7 +317,7 @@ export default function App(): JSX.Element {
       })
     }
   }, [])
-  // Native confirm() leaves Electron's renderer without text focus on Windows, so use an in-app dialog.
+  // Native confirm() can leave the webview without text focus on Windows, so use an in-app dialog.
   const [confirmDialog, setConfirmDialog] = useState<{ message: string } | null>(null)
   const confirmResolverRef = useRef<((ok: boolean) => void) | null>(null)
   const askConfirm = useCallback((message: string) => {
@@ -613,53 +614,14 @@ export default function App(): JSX.Element {
     }
   }
 
-  const onMainDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    if (e.dataTransfer.types.includes('Files')) {
-      e.dataTransfer.dropEffect = 'copy'
-    }
-  }, [])
+  const mainRef = useRef<HTMLElement | null>(null)
 
-  const onMainDragEnter = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    if (e.dataTransfer.types.includes('Files')) {
-      setFileDragOver(true)
-    }
-  }, [])
-
-  const onMainDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    const related = e.relatedTarget as Node | null
-    if (!related || !e.currentTarget.contains(related)) {
-      setFileDragOver(false)
-    }
-  }, [])
-
-  const onMainDrop = useCallback(
-    async (e: React.DragEvent) => {
-      e.preventDefault()
-      e.stopPropagation()
-      setFileDragOver(false)
+  const uploadDroppedPaths = useCallback(
+    async (paths: string[]) => {
       const sel = selection
       if (!sel || uploadBusy) return
-      const files = Array.from(e.dataTransfer.files)
-      if (files.length === 0) return
-      const paths: string[] = []
-      for (const f of files) {
-        try {
-          paths.push(window.bucketeer.pathFromFile(f))
-        } catch {
-          /* non-local drop */
-        }
-      }
       const unique = [...new Set(paths)]
-      if (unique.length === 0) {
-        setStatusMsg('Only files from your computer can be uploaded (not in-browser content).')
-        return
-      }
+      if (unique.length === 0) return
       setUploadBusy(true)
       setStatusMsg(null)
       try {
@@ -687,6 +649,36 @@ export default function App(): JSX.Element {
     },
     [loadObjects, prefix, selection, uploadBusy]
   )
+
+  // Tauri delivers OS file drops (with real paths) as native webview events rather than DOM drop events.
+  const uploadDroppedPathsRef = useRef(uploadDroppedPaths)
+  uploadDroppedPathsRef.current = uploadDroppedPaths
+  const hasSelectionRef = useRef(false)
+  hasSelectionRef.current = Boolean(selection)
+
+  useEffect(() => {
+    const overMain = (pos: { x: number; y: number }): boolean => {
+      const rect = mainRef.current?.getBoundingClientRect()
+      if (!rect) return false
+      const x = pos.x / window.devicePixelRatio
+      const y = pos.y / window.devicePixelRatio
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+    }
+    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
+      const p = event.payload
+      if (p.type === 'enter' || p.type === 'over') {
+        setFileDragOver(hasSelectionRef.current && overMain(p.position))
+      } else if (p.type === 'drop') {
+        setFileDragOver(false)
+        if (hasSelectionRef.current && overMain(p.position)) {
+          void uploadDroppedPathsRef.current(p.paths)
+        }
+      } else {
+        setFileDragOver(false)
+      }
+    })
+    return () => void unlisten.then((fn) => fn())
+  }, [])
 
   const onDownload = async () => {
     if (!selection || selectedKeys.size === 0) return
@@ -1111,10 +1103,7 @@ export default function App(): JSX.Element {
           className={`relative flex min-w-0 flex-1 flex-col bg-pane-bg ${
             selection && fileDragOver ? 'ring-2 ring-inset ring-sky-500/70' : ''
           }`}
-          onDragOver={selection ? onMainDragOver : undefined}
-          onDragEnter={selection ? onMainDragEnter : undefined}
-          onDragLeave={selection ? onMainDragLeave : undefined}
-          onDrop={selection ? onMainDrop : undefined}
+          ref={mainRef}
         >
           {!selection && (
             <div className="flex flex-1 items-center justify-center text-slate-500">
